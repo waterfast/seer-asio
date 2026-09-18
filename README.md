@@ -11,8 +11,9 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 项目 1 | Console Chat Server：客户端发字符串，服务端广播 | ✅ 完成（Asio + 协程） |
-| 项目 2 | Command Server：解析 `LOGIN` / `USE_SKILL` / `SURRENDER` 等命令 | ⬜ 未开始 |
+| 项目 2 | Command Server：解析 `LOGIN` / `USE_SKILL` / `SURRENDER` 等命令 | ✅ 完成 |
 | 项目 3 | JSON Protocol：每条消息换成 JSON 对象 | ⬜ 未开始 |
+| Lua 战斗核 | `packages/seer-core`：精灵/技能/**效果拼装**/**印记** + 两层事件 + 回合/生命值流程 + RPC | ✅ 能跑完整局（870 项测试） |
 
 详细路线见 `docs/learning-path.md`，环境依赖见 `docs/environment.md`。
 
@@ -35,6 +36,20 @@ seer-asio/
 │   │   └── client_socket.{h,cpp}    # 单条连接：读行、发送队列、断开回调
 │   └── server/
 │       └── chat_server.{h,cpp}      # 业务层：命名、广播
+├── packages/
+│   └── seer-core/             # Lua 侧战斗核（战斗大脑，纯 Lua 5.4）
+│       ├── lua/seer.lua       #   载入入口
+│       ├── lua/core/          #   基类：timing(时机)/trigger_data/skill/effect/pet/registry
+│       ├── lua/server/battle/ #   timing 时机表 / game_event 流程事件基类
+│       │                      #   hp 生命值流程 / gameflow 回合流程
+│       │                      #   logic 事件管理器 / damage 伤害 / element 克制
+│       ├── lua/server/rpc/    #   给 C++ 的 RPC 方法表（传输层留给项目 6）
+│       ├── lua/specs/         #   图鉴与技能的声明式数据（spec）
+│       ├── lua/server/rpc/    #   RPC（jsonrpc/stdio/peer/dispatchers/entry，抄自新月杀）
+│       ├── lua/specs/standard/#   雷伊（电系）/ 盖亚（战斗系），图鉴真实数据
+│       ├── examples/         #   battle_demo（跑一局看战报）/ rpc_demo（跨进程 RPC）
+│       ├── tests/test_core.lua#   870 项单跑测试（不需要 C++）
+│       └── README.md          #   设计说明、两层事件的说明、名词对照表
 └── tests/
     ├── smoke_test.py           # 冒烟测试（19 项，真的起服务端连客户端）
     └── pty_session.py          # 伪终端交互测试
@@ -77,9 +92,17 @@ make                  # = cmake -S . -B build && cmake --build build
                       # 产出 build/seer-server 和 build/seer-client
 make run-server       # 服务端，默认监听 0.0.0.0:9527
 make run-client       # 客户端，默认连 127.0.0.1:9527
-make test             # 冒烟测试 + 伪终端交互测试
+make test             # Lua 战斗核测试 + 冒烟测试 + 伪终端交互测试
+make test-lua         # 只跑 Lua 战斗核测试（不需要编译 C++，只要 lua5.4）
+make example          # 跑一局：雷伊 vs 盖亚（真实数据）+ 每种机制巡演一遍
+make example-rpc      # 同一局，但战斗核在子进程里、用 JSON-RPC 驱动
+make play             # 单机版：在命令行里和 AI 打一局（每轮自己选技能）
 make clean
 ```
+
+Lua 战斗核（`packages/seer-core`）只需要 **lua5.4**，和 C++ 服务端完全解耦——
+这就是"规则放 Lua"的直接好处：结算逻辑能脱离网络单独测。设计说明见
+`packages/seer-core/README.md`。
 
 默认用**独立版 Asio**（`#include <asio.hpp>`，轻）。想换成 **Boost.Asio**
 （freekill-asio 用的那个）只改一个开关，API 完全一样：
@@ -129,5 +152,9 @@ io_context 单线程就能驱动成百上千条连接——没有锁、没有竞
 
 ## 下一步
 
-项目 2（Command Server）：在 `ChatServer::onMessage()` 里加命令解析（那里已标好注释位置），
-并把命令表拆到独立文件。设计草案见 `docs/learning-path.md`。
+1. **项目 3（JSON Protocol）**：把"一行文本命令"换成 JSON 消息，分帧改成长度前缀。
+2. **给 Lua 战斗核填图鉴数据**：`packages/seer-core/lua/specs/` 下的 spec 现在是占位示例，
+   属性克制表、异常状态数值、性格名都标注了"待与图鉴核对"。
+3. **补完回合状态机**（换精灵/道具/逃跑）：`Round`/`Turn` 已经能跑完整局了，
+   缺的是这些赛尔号真实回合里的分支。
+4. 之后按 `docs/architecture.md` §10 的路线：Router/User → Lobby/Room → Lua 子进程 + RPC（项目 6）。

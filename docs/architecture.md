@@ -203,6 +203,33 @@ Lua 出规则、C++ 出 IO，本 spec 基本沿用并简化它。
   C++ 帮它等一下再继续。这就是 freekill `RoomThread::delay` 存在的意义。
 - **断线重连**：因为权威在 Lua、事件可重放，重连 = 把"从开局到现在的状态快照 + 事件"补发。
 
+**目前实现到哪一步**（细节见 `packages/seer-core/README.md`）：
+
+- ✅ **两层事件都做了**（这一点很关键，见下）：
+  * **时机**（`core/timing.lua`）照抄 freekill 的 `core/trigger_event.lua`：优先级降序、
+    refresh 前后两轮、`breakCheck` 打断、单精灵单时机次数上限、问玩家取选项；
+  * **流程事件**（`server/battle/game_event.lua`）照抄 freekill 的 `lua/server/gameevent.lua`：
+    协程、能插入子事件、能被打断、能停下来等外部回话，还有清场事件（ClearEvent）
+    负责"必须发生的收尾"。
+- ✅ 技能/效果/精灵都是 **spec 驱动**的：规则作者只写声明式表，核心负责造对象。
+  效果类型和异常状态都是可注册的数据，加玩法不用改核心。
+- ✅ 生命值与回合的流程（照 freekill 的 `hp.lua` / `gameflow.lua`）：
+  `ChangeHp`（唯一改 hp 的入口）/ `Damage` / `Recover`、
+  `Round`（一大回合）/ `Turn`（一次行动）/ `UseSkill`。
+- ✅ 确定性随机（xoshiro256\*\*，自带种子与状态导出）、事件流记录（两层都记，可回放）、
+  属性克制与伤害公式；`logic:start()` 已经能把一整局打完并分出胜负。
+- ✅ 事件树查询：`findParent` / `searchEvents` —— "这次伤害是哪次技能使用引起的"能直接回答。
+- ✅ 询问机制（抄 freekill 的 `Request` / `RequestHandler`）：规则只说"我要问这件事"，
+  "谁去答"由处理器决定 —— 单机命令行（`make play`）、AI（`request_hook`）、
+  真人客户端（挂起 + `logic:resume(答复)`）都是同一个接口的不同实现，
+  请求内容只有一处定义（`Request:toJson`）。
+- 🔶 RPC 层**已经能用了**（jsonrpc + stdio + peer + dispatchers，整份抄自新月杀的核心包），
+  `make example-rpc` 就是"两个真进程 + 真管道"跑完一整局；
+  挂起/恢复（`logic:start()` 返回 `"request"`、`logic:resume(答复)`）也已就位。
+  缺的只是**把对面换成 C++ 的 RoomThread** —— 项目 6。
+- ⬜ 回合状态机里剩下的分支：换精灵、道具、逃跑 —— 项目 7。
+- ⚠️ 属性克制表、异常状态数值、性格名、示例图的种族值都是**占位数据**，需按图鉴替换。
+
 ---
 
 ## 7. 数据模型与持久化（谁管什么）
@@ -246,15 +273,24 @@ seer-asio/
 │   ├── db/                      # SQLite 封装
 │   └── admin/                   # 管理员命令行
 ├── packages/
-│   └── seer-core/               # Lua 战斗规则（对应 freekill 的 packages/freekill-core）
-│       └── lua/server/
-│           ├── rpc/entry.lua    # Lua 侧 RPC 入口
-│           └── battle/          # 状态机、技能、克制、随机、事件
+│   └── seer-core/               # Lua 战斗规则（对应 freekill 的 packages/freekill-core）✅ 已落地
+│       ├── lua/seer.lua         #   载入入口（对应 freekill.lua + fk_ex.lua）
+│       ├── lua/core/            #   基类：timing(时机) / trigger_data / skill / pet / registry
+│       │   ├── effect/          #   效果：init(Effect 类) + kinds(内置效果类型 = 注册点)
+│       │   └── mark/            #   印记：init(基类) + status(异常状态类) + buff(增益印记类)
+│       ├── lua/server/battle/   #   game_event 流程事件基类 / hp 生命值 / gameflow 回合
+│       │                        #   timing 时机表 / logic 事件管理器 / damage / element
+│       ├── lua/server/request/  #   询问机制：Request + 处理器（命令行/AI/RPC）
+│       ├── lua/server/rpc/      #   RPC 方法表（传输层未实现，属于项目 6）
+│       ├── lua/specs/           #   图鉴与技能的声明式数据（spec），可由扩展包替换
+│       │                        #   standard/：雷伊与盖亚 + 包内自造效果/技能的样板
+│       └── tests/test_core.lua  #   "单跑 Lua 脚本"的测试入口（870 项，不需要 C++）
 ├── server/                      # SQL 建表脚本
-└── tests/                       # 含"单跑 Lua 脚本"的测试入口
+└── tests/                       # C++ 侧的冒烟/交互测试
 ```
 
-命名刻意对齐 freekill，读它源码时能直接对上。
+命名刻意对齐 freekill，读它源码时能直接对上。四个基类的设计说明、与 freekill 的
+名词对照、以及"现在**没有**做什么"的诚实清单，都在 `packages/seer-core/README.md`。
 
 ---
 
@@ -267,8 +303,9 @@ seer-asio/
 | 项目 3 | JSON 协议（长度前缀 + JSON 消息） | ⬜ 下一个 |
 | 项目 4 | Router + User/Session（登录、账号雏形） | ⬜ |
 | 项目 5 | Lobby / Room / RoomManager（建房、进房、准备、观战） | ⬜ |
-| 项目 6 | **Lua 子进程 + RPC 骨架**：C++ 拉起一个 Lua，来回 ping/pong 先跑通 | ⬜ 关键里程碑 |
-| 项目 7 | 最小战斗：两只精灵、回合制、克属 + 伤害、一个 `delay` 动画 | ⬜ |
+| — | **Lua 侧战斗核**：精灵/技能/效果 + 两层事件（时机 + 流程）+ 回合/生命值流程 | ✅ 能跑完整局 |
+| 项目 6 | **Lua 子进程 + RPC 骨架**：C++ 拉起一个 Lua，来回 ping/pong 先跑通 | ⬜ 关键里程碑（Lua 侧方法表已就位） |
+| 项目 7 | 最小战斗：两只精灵、回合制、克属 + 伤害、一个 `delay` 动画 | 🔶 出战顺序/克制/伤害已能跑；换精灵/道具/逃跑待做 |
 | 项目 8 | SQLite 持久化、断线重连、回放、Admin Shell | ⬜ |
 
 **项目 6 是分水岭**：之前都是在 C++ 单进程里练手（你已经做了 1、2，正在做 3），
