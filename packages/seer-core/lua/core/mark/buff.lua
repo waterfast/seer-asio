@@ -73,6 +73,7 @@ Buff.register("shield", {
   desc = "增益类印记：抵挡下一次受到的攻击，3 回合内没被打到就自己消失",
   duration = 3,
   triggers = {
+    -- ⚠ "DetermineDamage" 是**旧时机名**，现在不存在了（见 core/mark/init.lua 文件头）
     [Mark.timing("DetermineDamage")] = {
       priority = 0,
       on_trigger = function(trig, timing_obj, target, pet, data)
@@ -87,7 +88,8 @@ Buff.register("shield", {
 })
 
 --- 强化印记：攻击与特攻 ×1.5。
---- 它一行触发器都不用写——`stat_multipliers` 由 `pet:recalcStats()` 直接算进字段。
+--- 它一行触发器都不用写——`stat_multipliers` 原本由 `pet:recalcStats()` 直接算进字段
+--- （⚠ `Pet:recalcStats` 已随重构删除，见 core/mark/init.lua 文件头的第 3 条）。
 Buff.register("empower", {
   name = "强化印记",
   desc = "增益类印记：攻击与特攻提升到 1.5 倍，持续 3 回合",

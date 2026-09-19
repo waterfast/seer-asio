@@ -2,6 +2,39 @@
 --
 -- ============================ 印记（Mark）============================
 --
+-- ⛔ 当前状态：**不要 require 这个文件，它会加载失败**。
+--
+-- `seer.lua` 里已经刻意**没有**加载 `core.mark`（那里留了 TODO）。原因是这个目录
+-- 整体依赖一套**还没重建**的效果 / 触发器体系，具体缺什么：
+--
+--   1. `OwnedTrigger` —— **类不存在**。本文件末尾 `MarkTrigger = OwnedTrigger:subclass(...)`
+--      会在**加载期**直接报 "attempt to index a nil value (global 'OwnedTrigger')"，
+--      整个模块进不来。原来它是"谁拥有这个触发器"的基类（效果/技能/印记共用），
+--      和 TriggerEvent / TriggerData 一样属于需要重建的触发体系。
+--   2. `pet.marks` / `pet.effects` —— 挂在精灵身上的印记表与效果表。重构后的
+--      `Pet` 只剩"初始化 + getter"（见 core/pet.lua），这些战斗状态字段全部删掉了；
+--      将来的归宿应该是战斗逻辑（`GameLogic`）或一层独立的战斗状态对象。
+--   3. `pet:recalcStats()` —— 能力等级 / 印记倍率的重算入口，Pet 上已删除
+--      （Pet 现在只在 initialize 里算一次六项属性值）。
+--   4. `pet.seat` —— Pet 上已没有 seat（现在只有 `GameLogic:_defaultSides` 临时挂的
+--      "阵营内序号"），所以 `("#mark_%s_%s"):format(pet.seat or 0, ...)` 这类命名要重想。
+--   5. `logic:applyEffect(...)` / `logic:removeTrigger(...)` —— `GameLogic`
+--      （server/gamelogic.lua）上没有这两个入口。
+--   6. `Effect:create(spec, source, pet)` —— 效果现在只有 `core/effect/effect.lua`
+--      这一个文件（**没有 init.lua**），而且 `Seer:createEffect(spec, source, target)`
+--      才是唯一的创建入口；`Effect.create` 这个写法不存在。
+--   7. `SeerTiming[name]` 里的**旧时机名**：`Mark.timing("RoundEnd")` /
+--      `"DetermineDamage"` / `"BeforeAction"` 这些名字现在都不存在了——
+--      当前只有 core/events 里的 18 个时机（TurnEnd / AfterTurnEnd /
+--      DamageCalculate / BeforeAttack …）。`SeerTiming` 由 seer.lua 按那 18 个类重建。
+--
+-- 结论：**印记体系（含异常状态）与效果/触发器体系一起待重建**。重建时需要的
+-- 零件清单就在上面这 7 条。在那之前，本目录的文件保持原样、只作参考，
+-- `specs/` 里的包也不要再写 `marks = {...}`（`Seer:addMark` 也不存在，
+-- 见 core/engine.lua 的 addPackage）。
+--
+-- ============================ 原始说明 ============================
+--
 -- 这个**文件夹**装的是"挂在精灵身上、有回合数、会自己动"的东西：
 --
 --   mark/init.lua    —— Mark 基类：注册表、生命周期、被动触发器（本文件）
@@ -194,16 +227,20 @@ function Mark.classOf(key)
 end
 
 --- 按名字取时机类。
---- 印记要挂 BeforeAction / RoundEnd / DetermineDamage 这些时机，而它们是在
---- `server/battle/timing.lua` 里登记的——所以**印记相关的文件必须在那之后加载**
---- （见 seer.lua 的加载顺序）。这里按名字查、查不到就告警，
---- 免得"少挂一个时机"变成静默失效。
+---
+--- ⚠ 调用方（本目录的 status.lua / buff.lua）现在传的还是**旧时机名**
+--- （"BeforeAction" / "RoundEnd" / "DetermineDamage"）——那些名字已经随重构消失，
+--- 当前只有 core/events 里的 18 个时机（TurnEnd / AfterTurnEnd / DamageCalculate /
+--- BeforeAttack …），`SeerTiming` 由 seer.lua 按那张清单重建。
+--- 所以现在这个查询一律查不到、只留一条 warning；重建印记体系时要把调用方
+--- 的时机名一起换掉（见本文件头的第 7 条）。
 ---@param name string
----@return Timing?
+---@return TriggerEvent?
 function Mark.timing(name)
   local klass = SeerTiming and SeerTiming[name]
   if klass == nil then
-    Log.warning(("印记要用时机 %s，但它还没登记"):format(name))
+    Log.warning(("印记要用时机 %s，但它还没登记（旧时机名，见 core/mark/init.lua 文件头）")
+      :format(name))
   end
   return klass
 end

@@ -101,7 +101,10 @@ function StatusMark:getClassName() return StatusMark.CLASS_NAME[self.def.mark_ty
 -- ============================ 弱化类 ============================
 
 --- 往钩子表里挂一条：时机还没登记时**跳过并告警**（而不是 `triggers[nil]` 直接崩）。
---- 时机是在 `server/battle/timing.lua` 里登记的，本文件必须在那之后加载（见 seer.lua）。
+---
+--- ⚠ 本目录整体待重建（不要 require，见 core/mark/init.lua 文件头的清单）。
+--- 下面这些**旧时机名**（"RoundEnd" / "BeforeAction" / "DetermineDamage"）都不再存在：
+--- 现在是 core/events 里那 18 个时机，按名字查走 seer.lua 重建的 `SeerTiming`。
 ---@param tbl table
 ---@param timing_name string
 ---@param spec table
