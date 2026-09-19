@@ -403,7 +403,9 @@ API：`pet:hasEffect / getEffects / getEffectsByKind / countEffects / removeEffe
 遍历一律走这些方法（按名字排序返回数组），别用 `pairs(pet.effects)`——
 哈希顺序会让同一局回放出现两种结果（§2.3）。
 
-**完整分析（含"我要加 X 该改哪里"的对照表）见 [`docs/effects-marks-status.md`](../../docs/effects-marks-status.md)。**
+**⚠ 本节以下描述的效果/印记结构属于重构前：`docs/effects-marks-status.md`
+（原有的完整分析 + "我要加 X 该改哪里"对照表）已随重构删除，印记/异常状态体系整体待重建——
+零件清单见 `lua/core/mark/init.lua` 文件头。**
 
 ---
 

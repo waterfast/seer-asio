@@ -1,6 +1,25 @@
 # 学习路线与设计笔记
 
 > 这份文档是给"以后接着做"的自己看的：每一步做什么、怎么算做完、坑在哪。
+>
+> ## ⚠️ 本文档描述的是**重构前**的状态，以代码为准
+>
+> 里面的"设计笔记 / 踩坑记录"部分（为什么这么设计、错在哪）仍然值得读，
+> 但**具体文件与 API 已经变了**，别照着抄：
+>
+> * `core/registry.lua` → `core/engine.lua`；`core/timing.lua` / `core/trigger_data.lua`
+>   → `core/trigger_event.lua` + `core/events/`（18 个时机类）；
+> * `server/battle/*` 整个删除 → `server/gamelogic.lua`（`GameLogic`）；
+> * `core/effect/kinds.lua`（效果类型注册表）、`Effect.registerKind`、
+>   `SkillSet` / `TriggerSkill` / `SkillSkeleton` 都已删除；
+> * `Status.register` / `Mark:attach` / `logic:applyMark` / `pet.marks` / `pet.effects` /
+>   `pet:recalcStats` 这些印记与状态 API **随重构一起没了**，印记体系待重建
+>   （缺什么见 `packages/seer-core/lua/core/mark/init.lua` 文件头）；
+> * `docs/effects-marks-status.md` **已删除**（描述的就是那套待重建的效果/印记结构），
+>   本文里所有指向它的链接都失效了；
+> * `make test-lua` / `tests/test_core.lua`（870 项）也已删除，新的测试还没写。
+>
+> 当前真实结构与"还缺什么"，看 `packages/seer-core/README.md` 的 §1 / §1.1。
 
 ## 总体路线
 
@@ -179,10 +198,11 @@ socket、不需要数据库、也不需要 C++。它只要 Lua 5.4 就能跑。�
 
 **这一课真正学到的**：
 
-- **数据与代码分家**的价值：`Status.register("poison", { turn_end_damage = {1,8} })`
+- **数据与代码分家**的价值：`Status.register("poison", { turn_end_damage = {1,8} })`（⚠ 旧 API）
   就是"中毒每回合掉 1/8 血"这条规则本身。改数值 = 改数据，不动一行逻辑。
-  连"加一种全新效果类型"都只是往注册表里塞一份说明书（`Effect.registerKind`，
-  内置的在 `lua/core/effect/kinds.lua`，扩展包写在自己的 `specs/<包>/effects.lua`）。
+  连"加一种全新效果类型"都只是往注册表里塞一份说明书（⚠ `Effect.registerKind` 与
+  `core/effect/kinds.lua` **已随重构删除**，效果现在是"一张 spec 造一个 Effect 实例"，
+  创建入口 `Seer:createEffect`）。
 - **事件系统是这套架构的骨架**：所有玩法最终都化成"在某个时机做某件事"。
   所以**时机的粒度就是这套系统的表达力上限**——想不出"对手出手前"这个时机，
   就永远写不出"降低对手攻击"的效果。
@@ -202,7 +222,7 @@ socket、不需要数据库、也不需要 C++。它只要 Lua 5.4 就能跑。�
   要能被"解除异常状态"精确地挑出来）。所以精灵身上是两张表：`pet.effects`（Effect）
   和 `pet.marks`（Mark/异常状态），但触发器装载、数值重算、回合末递减三处共用同一份实现。
   而**技能上的效果和挂在身上的回合类效果是同一个 `Effect` 类**，区别只有寿命
-  （`instant` + `duration`）——分析见 `docs/effects-marks-status.md`。
+  （`instant` + `duration`）——分析原本在 `docs/effects-marks-status.md`，**该文档已删除**。
 - **类层次用来消灭重复，表用来写数据**：异常状态分弱化类/控制类，同一类的钩子代码
   一模一样（只有"掉几分之几""几成概率动不了"不同），所以"这一类怎么动"写进子类
   （`WeakenStatus` / `ControlStatus`），具体状态只写 5 行数据
@@ -251,13 +271,15 @@ socket、不需要数据库、也不需要 C++。它只要 Lua 5.4 就能跑。�
   属性克制表/异常状态数值是占位数据，就在注释和 README 里写明白。
   半个能用的东西比明说"还没做"更浪费时间。
 
-想加东西之前先看 [`effects-marks-status.md`](effects-marks-status.md)：
-效果类型写在哪、印记和异常状态是什么关系、"技能效果"和"身上的回合类效果"为什么是同一个类，
-以及"我要加 X 该改哪个文件"的对照表。
+⚠ 原来这里指向 `docs/effects-marks-status.md`（讲效果类型写在哪、印记和异常状态的关系、
+"我要加 X 该改哪个文件"）——**那份文档已随重构删除**，因为它描述的效果/印记结构正是
+现在待重建的部分。重建时的零件清单在 `packages/seer-core/lua/core/mark/init.lua` 文件头。
 
-**验收**：`make test-lua` —— 870 项检查，全绿，**不需要编译 C++**；
-`logic:start()` 能把一整局打完并分出胜负；
-`make play` 能在命令行里真打一局（单机版）；`make example-rpc` 能让战斗核在子进程里被驱动。
+**验收**（⚠ 旧的 `make test-lua` / 870 项测试 / `make play` / `make example-rpc`
+都已失效：`tests/` 与 `examples/` 被删除）：
+现在能自动跑的是加载自检 `cd packages/seer-core && lua5.4 lua/seer.lua`
+（应当打印"种族 2，技能 39，时机 18"）；`GameLogic:run()` 能把一整局打完并分出胜负；
+交互式询问（单机命令行 / 真人客户端）**还没接上**（见 `server/gamelogic.lua` 的 TODO）。
 
 ---
 
