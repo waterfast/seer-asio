@@ -1,16 +1,41 @@
 # seer-core —— Lua 侧战斗核
 
-这是**战斗大脑**：赛尔号的对战规则全在这里。对应 freekill 的 `packages/freekill-core`，
-位置和目录也是照 `docs/architecture.md` §9 的规划来的。
+> ## ⚠️ 本文档描述的是**重构前**的状态，以代码为准
+>
+> 正在进行的重构已经改掉了下面这些名字 / 文件（本 README 尚未逐节重写，
+> 只有 §1 的文件表与这一段是新的）：
+>
+> * `core/registry.lua` → **`core/engine.lua`**（类名仍是 `Seer`）；
+> * `core/timing.lua` / `core/trigger_data.lua` → **`core/trigger_event.lua`（TriggerEvent）
+>   + `core/events/`（TriggerData 基类 + 18 个时机类）**，不再是"31 个时机"；
+> * `server/battle/*` **整个目录已删除** → 现在是 `server/gamelogic.lua`（`GameLogic`，
+>   `run()` 直接循环跑完整局）+ `server/gameevent.lua`（协程式流程事件基类，待接）；
+> * `core/skill.lua` 里的 `SkillSet` / `TriggerSkill` / `SkillSkeleton`、
+>   `core/effect/kinds.lua`（效果类型注册表）**都已删除**：
+>   技能 = 数值 + effects + triggers 的一张表，效果改成"一张 spec 造一个实例"；
+> * `Skill.Ability` / `Skill.Compulsory` / `Skill.Contact` 这些标签常量**从来没定义过**，
+>   引用它们的地方已清理；
+> * `Pet` 上的战斗状态（当前体力 / 能力等级 / 印记 / PP / 封印 / 濒死 / side / seat）
+>   **全部删除**：现在的 Pet 只有"初始化 + getter"，那些状态归战斗逻辑；
+> * `core/mark/*`（印记 / 异常状态 / 增益印记）**整体待重建**，
+>   `seer.lua` 已不加载它（缺 `OwnedTrigger` 等，清单见 `core/mark/init.lua` 文件头）；
+> * `examples/`、`tests/test_core.lua`、`docs/effects-marks-status.md` **已删除**
+>   （整份基于已删除的 API / 旧结构）；
+> * `lua/specs/`：`demo.lua`、`standard/effects.lua` 已删除；保留 `standard/skills.lua`
+>   （37 条图鉴技能）+ `standard/species.lua`（种族值）两个**纯数据**包。
+>
+> 想看"现在真实有什么"，读这张表和 `lua/seer.lua` 的文件头。
+
+这是**战斗大脑**：赛尔号的对战规则全在这里。对应 freekill 的 `packages/freekill-core`。
 
 ```bash
-# 单跑测试：不需要 C++、不需要客户端、不需要数据库
-make test-lua
-# 或者
-cd packages/seer-core && lua5.4 tests/test_core.lua
+# 起来看看能不能加载（会打印"种族 / 技能 / 时机"各有多少）
+cd packages/seer-core && lua5.4 lua/seer.lua
 ```
 
 只依赖 **Lua 5.4**（`xoshiro256**` 用了 64 位整数运算）。
+（旧的 `make test-lua` / `lua5.4 tests/test_core.lua` 已经没有用了：`tests/` 里的
+测试随重构删除，新的测试还没写。）
 
 ---
 
@@ -18,41 +43,73 @@ cd packages/seer-core && lua5.4 tests/test_core.lua
 
 | 文件 | 干什么 | 对应 freekill |
 | --- | --- | --- |
-| `lua/core/timing.lua` | **时机基类**（Timing）：一个"时刻"，把这一刻想插一脚的人按优先级问一遍 | `lua/core/trigger_event.lua`（TriggerEvent） |
-| `lua/core/trigger_data.lua` | 时机/事件的数据对象基类：`data` 在结算链上被各个时机改来改去 | `ltk/core/events/init.lua`（TriggerData） |
-| `lua/core/skill.lua` | **技能**：Skill（数值）+ TriggerSkill（时机钩子）+ SkillSkeleton（spec 工厂）+ **SkillSet（技能栏：4 个普通技能 + 第五技能）** | `ltk/core/skill*.lua` |
-| `lua/core/effect/init.lua` | **效果**：Effect 类（注册表、目标解析、结算、生命周期：瞬时 / 持续两种寿命） | `ltk/core/skill_skeleton.lua` 的 effects 机制 |
-| `lua/core/effect/kinds.lua` | **效果类型的注册点**：内置 12 种（伤害/回复/能力等级/印记/消强/增伤…） | 同上 |
-| `lua/core/mark/init.lua` | **印记基类**：注册表、生命周期、被动触发器（`Mark.defs` / `MarkTrigger`） | 无（freekill 没有对应物） |
-| `lua/core/mark/status.lua` | **异常状态类**：弱化类（WeakenStatus）/ 控制类（ControlStatus）+ 内置 7 种状态 | 无 |
-| `lua/core/mark/buff.lua` | **增益印记类**（BuffMark）+ 两个通用例子（护盾 / 强化） | 无 |
-| `lua/core/pet.lua` | **精灵**：PetSpecies（种族值）+ Pet（六项当前数值是**字段**，见 §3.2） | `ltk/core/general.lua` + `player.lua` |
-| `lua/core/registry.lua` | 全局注册表 `Seer`：图鉴、技能、效果类型、时机、扩展包 | `ltk/core/engine.lua`（运行时叫 `Fk`） |
-| `lua/server/battle/timing.lua` | 具体的**时机表**和它们的数据类（31 个时机） | `ltk/core/events/*.lua` |
-| `lua/server/battle/game_event.lua` | **流程事件基类**（GameEvent）：协程事件 + 清场事件 | `lua/server/gameevent.lua` |
-| `lua/server/battle/hp.lua` | **生命值流程**：ChangeHp（唯一改血的入口）/ Damage / Recover | `ltk/server/events/hp.lua` |
-| `lua/server/battle/gameflow.lua` | **回合流程**：Round（一大回合）/ Turn（一次行动）/ UseSkill，以及 `logic:run()` | `ltk/server/events/gameflow.lua` |
-| `lua/server/battle/logic.lua` | 战局调度器：**事件管理器** + 时机注册 + 结算门面 + 问客户端 | `lua/server/gamelogic.lua`（GameLogic） |
-| `lua/server/battle/damage.lua` | 伤害公式（系数全是可改的常量） | — |
-| `lua/server/battle/element.lua` | 属性克制机制 + 倍率表 | — |
-| `lua/server/rpc/jsonrpc.lua` | **JSON-RPC 2.0**（整份抄自新月杀，见 §5.1） | `lua/server/rpc/jsonrpc.lua` |
-| `lua/server/rpc/stdio.lua` | stdio 传输（一行一条 JSON 消息） | `lua/server/rpc/stdio.lua` |
-| `lua/server/rpc/peer.lua` | 出口：`call`（发请求等答复）/ `notify` + 信号（notifyPlayers/delay/gameOver） | `lua/server/rpc/fk.lua` 的 callRpc 部分 |
-| `lua/server/rpc/dispatchers.lua` | **对面能调我们的方法表**（ping/startGame/runGame/handlePlayerAction…） | `lua/server/rpc/dispatchers.lua` |
-| `lua/server/rpc/entry.lua` | RPC 进程入口：载入核心 + 主循环 | `lua/server/rpc/entry.lua` |
-| `lua/server/request/init.lua` | **询问机制**：Request（问谁/问什么/兜底答复/超时与取消规范化） | `lua/server/request.lua` |
-| `lua/server/request/handler.lua` | **RequestHandler** 基类 + AiHandler（就地作答）+ DefaultHandler（无头降级） | `lua/core/request_handler.lua` |
-| `lua/server/request/cli.lua` | **命令行处理器**：单机版（`make play`） | 无（freekill 只有 Qt 客户端） |
-| `lua/server/request/rpc.lua` | **RPC 处理器**：挂起等 C++/Unity 回话 | 同 request.lua 的客户端一侧 |
-| `lua/server/session.lua` | 会话：roomId → 一局对战（房间适配器 + BattleLogic + 精灵） | `lua/server/roombase.lua` 的一部分 |
-| `lua/lib/json.lua` / `lua/lib/cbor.lua` | 第三方编解码库（都是 MIT，逐字节复制） | 同名文件 |
-| `lua/specs/standard/` | **标准阵容**：雷伊（电系）/ 盖亚（战斗系），种族值与技能表照图鉴抄的；`effects.lua` 是"包内注册新效果"的样板 | `standard/` |
-| `examples/battle_demo.lua` | 跑一局并打印战报（进程内，`make example`） | — |
-| `examples/rpc_demo.lua` | 同一局，但战斗核在**子进程**里、用 JSON-RPC 驱动（`make example-rpc`） | — |
-| `examples/single_player.lua` | 单机版：命令行里和 AI 打一局（`make play`），界面层可换 | — |
-| `lua/seer.lua` | 载入入口：环境、全局类、加载扩展包 | `lua/freekill.lua` + `lua/fk_ex.lua` |
-| `lua/specs/demo.lua` | 示例数据包（4 只精灵、9 个技能、1 个特性）**兼写法样板** | `standard/`、`standard_cards/` |
-| `tests/test_core.lua` | 870 项单跑测试，同时也是一份用法说明书 | — |
+| `lua/seer.lua` | 载入入口：环境（class/Util/Log/Rng）、全局类、时机表、扩展包 | `lua/freekill.lua` + `lua/fk_ex.lua` |
+| `lua/core/engine.lua` | 全局注册表 `Seer`（**原 registry.lua**）：种族/精灵/技能/效果/属性/扩展包 | `ltk/core/engine.lua`（运行时叫 `Fk`） |
+| `lua/core/skill.lua` | **技能**：只有数值 + getter（name/id/element/category/power/pp/accuracy/priority/target/crit_rate/hits/usable/effects/triggers/tags/desc/extra）；常量 `Skill.Physical/Special/Status` | `ltk/core/skill.lua` |
+| `lua/core/pet.lua` | **精灵**：`PetSpecies`（种族，静态）+ `Pet`（实例，六项属性值是**字段**）；只有初始化 + getter | `ltk/core/general.lua` |
+| `lua/core/trigger_event.lua` | **时机基类**（TriggerEvent）：某一刻"谁想插一脚" | `ltk/core/trigger_event.lua` |
+| `lua/core/events/init.lua` | **TriggerData 基类** + 18 个时机类的清单（`timings`） | `ltk/core/events/init.lua` |
+| `lua/core/events/gameflow.lua` | 流程类时机：BattleStart / TurnStart / TurnReady / DecidePriority / TurnEnd / AfterTurnEnd / BattleEnd（+ 它们的数据类） | `ltk/core/events/gameflow.lua` |
+| `lua/core/events/attack.lua` | 出手与伤害链：BeforeAttack / AttackStart / DamageParamCalculate / Before・After・FinalDamageCalculate / AttackReady / Attack / AfterAttack / AttackEnd | `ltk/core/events/*` |
+| `lua/core/elements/` | **属性克制**：`Elements.getMultiplier(attack, defend)` + 倍率表 | — |
+| `lua/core/effect/effect.lua` | **效果**（Effect）：id/name/reason/timing/can_trigger/on_cost/on_use。⚠ **没有 `init.lua`**，创建入口是 `Seer:createEffect`（见"还差什么"） | `ltk/core/skill_skeleton.lua` 的 effects 机制 |
+| `lua/core/gameobject.lua` | 游戏对象基类（精灵/道具/场地的统一父类，给时机当 target） | — |
+| `lua/core/mark/*` | 印记 / 异常状态 / 增益印记：**整体待重建，现在不要加载**（缺 `OwnedTrigger` 等，清单见 `core/mark/init.lua` 文件头） | 无（freekill 没有对应物） |
+| `lua/server/gamelogic.lua` | **战斗逻辑 `GameLogic`**：导入双方精灵 → 技能装进时机表 → 回合循环；`run()` 跑完整局 | `lua/server/gamelogic.lua` |
+| `lua/server/gameevent.lua` | **流程事件基类**（GameEvent）：协程事件 + 清场事件。**目前只保证能 require**，事件栈还没移植进 GameLogic | `lua/server/gameevent.lua` |
+| `lua/server/session.lua` | 会话：roomId → 一局对战（房间适配器 + GameLogic + 精灵 + 协议座位） | `lua/server/roombase.lua` 的一部分 |
+| `lua/server/request/init.lua` | **询问机制**：Request（问谁/问什么/兜底答复/超时与取消规范化）。⚠ 还没接进 GameLogic | `lua/server/request.lua` |
+| `lua/server/request/handler.lua` | RequestHandler 基类 + AiHandler（就地作答）+ DefaultHandler（无头降级） | `lua/core/request_handler.lua` |
+| `lua/server/request/cli.lua` | 命令行处理器（单机版） | 无 |
+| `lua/server/request/rpc.lua` | RPC 处理器：挂起等对面回话 | 同 request.lua 的客户端一侧 |
+| `lua/server/rpc/jsonrpc.lua` | **JSON-RPC 2.0** | `lua/server/rpc/jsonrpc.lua` |
+| `lua/server/rpc/stdio.lua` | stdio 传输（一行一条 JSON 消息） | 同上 |
+| `lua/server/rpc/peer.lua` | 出口：`call`（发请求等答复）/ `notify` + 信号（notifyPlayers/delay…） | `lua/server/rpc/fk.lua` 的 callRpc 部分 |
+| `lua/server/rpc/dispatchers.lua` | **对面能调我们的方法表**（ping/startGame/runGame/handlePlayerAction/surrender…） | 同名文件 |
+| `lua/server/rpc/entry.lua` | RPC 进程入口：载入核心 + 主循环 | 同名文件 |
+| `lua/lib/json.lua` / `cbor.lua` | 第三方编解码库（MIT，逐字节复制） | 同名文件 |
+| `lua/specs/standard/skills.lua` | 雷伊 / 盖亚的**真实技能表**（37 条，照图鉴抄） | `standard/` |
+| `lua/specs/standard/species.lua` | 种族值（雷伊 70 / 盖亚 261） | `standard/` |
+| `lua/specs/init.lua` | 扩展包清单（手写数组，顺序即加载顺序） | `standard/init.lua` |
+
+已删除（别再去找）：`core/registry.lua`、`core/timing.lua`、`core/trigger_data.lua`、
+`core/effect/kinds.lua`、`core/events/hp.lua`、`server/battle/*`、`examples/*`、
+`tests/test_core.lua`、`lua/specs/demo.lua`、`lua/specs/standard/effects.lua`、
+`docs/effects-marks-status.md`。
+
+---
+
+### 1.1 重构后仍然缺的东西（谁要接着改，先看这里）
+
+按"卡住谁"排序，**这些都是当前真实存在的缺口**：
+
+1. **`core/effect/init.lua` 不存在**：只有 `core/effect/effect.lua` 一个文件。
+   `require "core.effect"` 会失败，所以 `seer.lua` 是直接按文件名把它载进来的
+   （见那里的 TODO）。缺的是"效果怎么创建 / 怎么挂到精灵上 / 什么时候结算"那一层：
+   现在 `Seer:createEffect(spec, source, target)` 只做到 `Effect:new` + 记进 `Seer.effects`，
+   **没有任何地方会执行效果**（技能上的 `effects` 只是数据，回合循环不看它）。
+2. **印记 / 异常状态体系待重建**（`core/mark/*`）：缺 `OwnedTrigger`（类不存在，
+   加载即炸）、`pet.marks` / `pet.effects`、`pet:recalcStats()`、`logic:applyEffect`、
+   `logic:removeTrigger`，以及旧时机名 → 新 18 个时机的映射。
+   完整清单在 `core/mark/init.lua` 文件头。
+3. **`Seer:addMark` 不存在**：`core/engine.lua` 的 `addPackage` 对 `spec.marks`
+   会调 `self:addMark(...)`，那个方法**没有实现**（engine.lua 里那一节写着"扽得改重构"）。
+   所以包 spec 里现在**不要写 `marks = {...}`**（写了会崩）。
+4. **Request（询问）层没接进 GameLogic**：`GameLogic` 现在用内置 `pickAction`
+   自动选招、一跑到底，没有 `start()` / `resume(reply)` / `pending_request` /
+   `getRequestHandler`。所以 `Dispatchers.handlePlayerAction` 返回 `not_implemented`，
+   单机命令行 / 真人客户端都还接不上。
+5. **GameEvent 的事件栈没移植**：`logic:getCurrentEvent/pushEvent/resumeEvent`、
+   `game_event_stack`、`cleaner_stack`、`event_recorder`、`all_game_events` 都不在
+   新的 `GameLogic` 上。`server/gameevent.lua` 现在只保证能 require（用到的地方会明确报错）。
+6. **特性（魂印）没有着落**：`PetSpecies` / `Pet` 上没有 `ability` 字段，
+   `specs` 里那份占位特性已删；机制上它应该是"挂在时机上的技能/效果"，
+   等触发体系重建后再补。
+7. **能力等级（±6）、封印、当前体力这些战斗状态还没有归宿**：现在只有
+   `GameLogic` 临时挂在 `pet` 上的 `pet.hp` / `pet.max_hp` / `pet.fainted`
+   （见 `gamelogic.lua` 的注释，那里自己标了"后续再收口"）。
+8. **测试全没了**：`tests/` 已删，新的还没写。目前能自动跑的只有
+   `lua5.4 lua/seer.lua`（加载自检）和"造两只精灵跑一局"这种手写脚本。
 
 ---
 
