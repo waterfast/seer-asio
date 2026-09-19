@@ -1,218 +1,86 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
+--
+-- ============================ 战斗 / 回合流程时机 ============================
+--
+-- 一局战斗的外层时间轴：
+--
+--   BattleStart ── TurnStart ── TurnReady ── DecidePriority
+--        ──>（攻击流程，见 attack.lua）── TurnEnd ── AfterTurnEnd
+--        ──>（下一回合，直到分出胜负）── BattleEnd
+--
+-- 和 freekill 的"轮 / 回合 / 阶段"不同：赛尔号没有判定/摸牌/出牌/弃牌那一套，
+-- 一个大回合 = 双方各行动一次（先手那方的攻击结算夹在中间）。
+-- 所以这里只有"战斗 / 回合"两层；攻击与伤害那 11 个时机单独放 attack.lua。
+--
+-- 本文件只写**定义**（数据类 + 时机类）。真正的调度（先制度排序、回合循环、
+-- 胜负判定）属于流程事件（GameEvent）与 BattleLogic，后面再实现。
 
---- DrawInitialData 关于摸起始手牌的数据
----@class DrawInitialDataSpec
----@field public who ServerPlayer[] @ 摸牌的玩家
----@field public disable_luck boolean? @ 是否允许手气卡，默认跟随房间设置
----@field public num integer @ 摸牌数
----@field public fix_ids integer[]? @ 起始手牌固定牌池，若数量不足则从牌堆补至num
----@field public cards integer[] @ 摸到的起始手牌
+-- ---------------------------- 数据类 ----------------------------
 
---- 关于摸起始手牌的数据
----@class DrawInitialData: DrawInitialDataSpec, TriggerData
-DrawInitialData = TriggerData:subclass("DrawInitialData")
+--- 战斗开始的数据。暂无可携带的字段，先占一个类型位（类型标注与协议会用到）。
+---@class BattleStartData: TriggerData
+BattleStartData = TriggerData:subclass("BattleStartData")
 
----@class DrawInitialEvent: TriggerEvent
----@field data DrawInitialData
-local DrawInitialEvent = TriggerEvent:subclass("DrawInitialEvent")
+--- 战斗结束的数据。
+---@class BattleEndData: TriggerData
+---@field public winner any @ 获胜方（Unit 或具体精灵，类型待对战局结构敲定后收紧）
+---@field public reason string? @ 结束原因（一方全灭 / 投降 / 超时……）
+BattleEndData = TriggerData:subclass("BattleEndData")
 
----@class fk.DrawInitialCards: DrawInitialEvent
-fk.DrawInitialCards = DrawInitialEvent:subclass("fk.DrawInitialCards")
----@class fk.AfterDrawInitialCards: DrawInitialEvent
-fk.AfterDrawInitialCards = DrawInitialEvent:subclass("fk.AfterDrawInitialCards")
-
---- RoundData 轮次的数据
----@class RoundDataSpec
----@field public from ServerPlayer @ 上个执行额定回合的角色
----@field public to ServerPlayer @ 即将执行额定回合的角色
----@field public turn_table? ServerPlayer[] @ 额定回合表，对于通常模式是所有玩家
----@field public skipped? boolean @ 是否跳过额定回合
-
---- 轮次的数据
----@class RoundData: RoundDataSpec, TriggerData
----@field turn_table ServerPlayer[] @ 额定回合表
-RoundData = TriggerData:subclass("RoundData")
-
----@class RoundEvent: TriggerEvent
----@field data RoundData
-local RoundEvent = TriggerEvent:subclass("RoundEvent")
-
---- 轮次开始时
----@class fk.RoundStart: RoundEvent
-fk.RoundStart = RoundEvent:subclass("fk.RoundStart")
---- 轮次结束时
----@class fk.RoundEnd: RoundEvent
-fk.RoundEnd = RoundEvent:subclass("fk.RoundEnd")
---- 游戏开始时（第一轮开始时之前）
----@class fk.GameStart: RoundEvent
-fk.GameStart = RoundEvent:subclass("fk.GameStart")
---- 回合变化时
----@class fk.EventTurnChanging: RoundEvent
-fk.EventTurnChanging = RoundEvent:subclass("fk.EventTurnChanging")
-
---- TurnData 回合的数据
----@class TurnDataSpec -- TODO: 发挥想象力，填写这个Spec吧
----@field who ServerPlayer @ 本回合的执行者
----@field reason string @ 当前额外回合的原因，不为额外回合则为game_rule
----@field phase_table PhaseData[] @ 回合进行的阶段列表（包含额定与额外阶段），填空则为正常流程
----@field phase_index integer @ 当前进行的阶段索引值
----@field turn_end? boolean @ 是否结束此回合
-
---- 回合的数据
----@class TurnData: TurnDataSpec, TriggerData
+--- 回合数据（TurnStart / TurnReady / TurnEnd / AfterTurnEnd 共用）。
+---@class TurnData: TriggerData
+---@field public turn_number integer @ 第几个大回合，从 1 起
 TurnData = TriggerData:subclass("TurnData")
 
---- 构造函数，不可随意调用。
----@param who ServerPlayer @ 本回合的执行者
----@param reason? string @ 当前额外回合的原因，不为额外回合则为game_rule
----@param phases? Phase[] @ 回合进行的额定阶段列表
-function TurnData:initialize(who, reason, phases)
-  TriggerData.initialize(self, {})
-  self.who = who
-  self.reason = reason or "game_rule"
-  self.phase_table = table.map(
-    phases or {
-      Player.Start,
-      Player.Judge,
-      Player.Draw,
-      Player.Play,
-      Player.Discard,
-      Player.Finish
-    },
-    function(phase)
-      return
-        PhaseData:new{
-          who = who,
-          reason = "game_rule",
-          phase = phase
-        }
-    end
-  )
-  self.phase_index = 0
-  self.turn_end = false
-end
+--- 决定出手顺序的数据。赛尔号按"先制度 → 速度 → 座位"排，这里只装数据。
+---@class DecidePriorityData: TriggerData
+---@field public actions table[] @ 本回合双方各自选定的行动：`{ source, skill, target }`
+---@field public order GameObject[] @ 排好的出手顺序（元素是行动者，可与 actions 一一对应）
+DecidePriorityData = TriggerData:subclass("DecidePriorityData")
 
----@param phase Phase @ 阶段名称
----@param reason? string @ 额外阶段的原因，不为额外阶段则为game_rule
----@param who? ServerPlayer @ 额外阶段的执行者（默认为当前回合角色）
----@param extra_data? table @ 额外信息
-function TurnData:gainAnExtraPhase(phase, reason, who, extra_data)
-  table.insert(self.phase_table, self.phase_index + 1, PhaseData:new{
-    who = who or self.who,
-    reason = reason or "game_rule",
-    phase = phase,
-    extra_data = extra_data
-  })
-end
+-- ---------------------------- 时机类 ----------------------------
 
----@class TurnEvent: TriggerEvent
+--- 战斗开始。
+---@class BattleStart: TriggerEvent
+---@field data BattleStartData
+local BattleStart = TriggerEvent:subclass("BattleStart")
+
+--- 回合开始（双方选技能之前）。
+---@class TurnStart: TriggerEvent
 ---@field data TurnData
-local TurnEvent = TriggerEvent:subclass("TurnEvent")
+local TurnStart = TriggerEvent:subclass("TurnStart")
 
----（规则集“回合开始后④”，已弃用）
----@class fk.PreTurnStart: TurnEvent
-fk.PreTurnStart = TurnEvent:subclass("fk.PreTurnStart")
---- 回合开始前（规则集“回合开始后⑦”）
----@class fk.BeforeTurnStart: TurnEvent
-fk.BeforeTurnStart = TurnEvent:subclass("fk.BeforeTurnStart")
---- 回合开始时（规则集“回合开始后⑨”）
----@class fk.TurnStart: TurnEvent
-fk.TurnStart = TurnEvent:subclass("fk.TurnStart")
---- 回合结束时（规则集“回合结束前”）
----@class fk.TurnEnd: TurnEvent
-fk.TurnEnd = TurnEvent:subclass("fk.TurnEnd")
+--- 回合就绪（双方都选完了，即将进入出手阶段）。
+---@class TurnReady: TriggerEvent
+---@field data TurnData
+local TurnReady = TriggerEvent:subclass("TurnReady")
 
---- PhaseData 阶段的数据
----@class PhaseDataSpec
----@field who ServerPlayer @ 本阶段的执行者
----@field reason string @ 当前额外阶段的原因，不为额外阶段则为game_rule
----@field phase Phase
----@field phase_end? boolean @ 该阶段是否即将结束
----@field skipped? boolean @ 该阶段是否被跳过
+--- 决定出手顺序。
+---@class DecidePriority: TriggerEvent
+---@field data DecidePriorityData
+local DecidePriority = TriggerEvent:subclass("DecidePriority")
 
---- 阶段的数据
----@class PhaseData: PhaseDataSpec, TriggerData
-PhaseData = TriggerData:subclass("PhaseData")
+--- 回合结束（进入收尾前）。
+---@class TurnEnd: TriggerEvent
+---@field data TurnData
+local TurnEnd = TriggerEvent:subclass("TurnEnd")
 
----@class PhaseEvent: TriggerEvent
----@field data PhaseData
-local PhaseEvent = TriggerEvent:subclass("PhaseEvent")
+--- 回合结束后（持续效果/异常状态回合递减等收尾都在这里）。
+---@class AfterTurnEnd: TriggerEvent
+---@field data TurnData
+local AfterTurnEnd = TriggerEvent:subclass("AfterTurnEnd")
 
---- 阶段开始时
----@class fk.EventPhaseStart: PhaseEvent
-fk.EventPhaseStart = PhaseEvent:subclass("fk.EventPhaseStart")
---- 阶段进行时
----@class fk.EventPhaseProceeding: PhaseEvent
-fk.EventPhaseProceeding = PhaseEvent:subclass("fk.EventPhaseProceeding")
---- 阶段结束时
----@class fk.EventPhaseEnd: PhaseEvent
-fk.EventPhaseEnd = PhaseEvent:subclass("fk.EventPhaseEnd")
---- 阶段变化时
----@class fk.EventPhaseChanging: PhaseEvent
-fk.EventPhaseChanging = PhaseEvent:subclass("fk.EventPhaseChanging")
---- 阶段跳过时
----@class fk.EventPhaseSkipping: PhaseEvent
-fk.EventPhaseSkipping = PhaseEvent:subclass("fk.EventPhaseSkipping")
---- 阶段跳过后
----@class fk.EventPhaseSkipped: PhaseEvent
-fk.EventPhaseSkipped = PhaseEvent:subclass("fk.EventPhaseSkipped")
---- 进入出牌阶段空闲时点前
----@class fk.BeforePlayCard: PhaseEvent
-fk.BeforePlayCard = PhaseEvent:subclass("fk.BeforePlayCard")
+--- 战斗结束。
+---@class BattleEnd: TriggerEvent
+---@field data BattleEndData
+local BattleEnd = TriggerEvent:subclass("BattleEnd")
 
----@class DrawNCardsData: PhaseData
----@field public n integer 摸牌数量
-DrawNCardsData = PhaseData:subclass("DrawNCardsData")
-
----@class DrawNCardsEvent: TriggerEvent
----@field data DrawNCardsData
-local DrawNCardsEvent = TriggerEvent:subclass("DrawNCardsEvent")
-
---- 摸牌阶段摸牌前（描述为“摸牌阶段”）
----@class fk.DrawNCards: DrawNCardsEvent
-fk.DrawNCards = DrawNCardsEvent:subclass("fk.DrawNCards")
---- 摸牌阶段摸牌后
----@class fk.AfterDrawNCards: DrawNCardsEvent
-fk.AfterDrawNCards = DrawNCardsEvent:subclass("fk.AfterDrawNCards")
-
----@class StartPlayCardData
----@field timeout integer
-
---- 出牌阶段空闲时点开始
----@class fk.StartPlayCard: TriggerEvent
----@field data StartPlayCardData
-fk.StartPlayCard = TriggerEvent:subclass("fk.StartPlayCard")
-
----@alias RoundFunc fun(self: TriggerSkill, event: RoundEvent,
----  target: ServerPlayer, player: ServerPlayer, data: RoundData): any
----@alias TurnFunc fun(self: TriggerSkill, event: TurnEvent,
----  target: ServerPlayer, player: ServerPlayer, data: TurnData): any
----@alias PhaseFunc fun(self: TriggerSkill, event: PhaseEvent,
----  target: ServerPlayer, player: ServerPlayer, data: PhaseData): any
----@alias DrawInitFunc fun(self: TriggerSkill, event: DrawInitialEvent,
----  target: ServerPlayer, player: ServerPlayer, data: DrawInitialData): any
----@alias EventPhaseChangingFunc fun(self: TriggerSkill, event: fk.EventPhaseChanging,
----  target: ServerPlayer, player: ServerPlayer, data: PhaseData): any
----@alias EventTurnChangingFunc fun(self: TriggerSkill, event: fk.EventTurnChanging,
----  target: ServerPlayer, player: ServerPlayer, data: PhaseData): any
----@alias DrawNCardsFunc fun(self: TriggerSkill, event: DrawNCardsEvent,
----  target: ServerPlayer, player: ServerPlayer, data: DrawNCardsData): any
----@alias StartPlayCardFunc fun(self: TriggerSkill, event: fk.StartPlayCard,
----  target: ServerPlayer, player: ServerPlayer, data: StartPlayCardData): any
-
----@class SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: RoundEvent,
----  data: TrigSkelSpec<RoundFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: TurnEvent,
----  data: TrigSkelSpec<TurnFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: PhaseEvent,
----  data: TrigSkelSpec<PhaseFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: DrawInitialEvent,
----  data: TrigSkelSpec<DrawInitFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: fk.EventPhaseChanging,
----  data: TrigSkelSpec<EventPhaseChangingFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: fk.EventTurnChanging,
----  data: TrigSkelSpec<EventTurnChangingFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: DrawNCardsEvent,
----  data: TrigSkelSpec<DrawNCardsFunc>, attr: TrigSkelAttribute?): SkillSkeleton
----@field public addEffect fun(self: SkillSkeleton, key: fk.StartPlayCard,
----  data: TrigSkelSpec<StartPlayCardFunc>, attr: TrigSkelAttribute?): SkillSkeleton
+return {
+  BattleStart = BattleStart,
+  TurnStart = TurnStart,
+  TurnReady = TurnReady,
+  DecidePriority = DecidePriority,
+  TurnEnd = TurnEnd,
+  AfterTurnEnd = AfterTurnEnd,
+  BattleEnd = BattleEnd,
+}

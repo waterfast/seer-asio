@@ -1,40 +1,55 @@
----@class TriggerEvent: Object
----@field public id integer
----@field public room Room
----@field public target ServerPlayer?
----@field public data any 具体的触发时机会继承这个类 进而获得具体的data类型
----@field public skill_data table<string, table<string, any>>
----  某个技能在这个event范围内的数据，比如costData之类的
----@field public finished_skills string[] 已经发动完了的技能 不会再进行检测
----@field public refresh_only boolean? 这次triggerEvent是不是仅执行refresh
----@field public invoked_times table<string, number> 技能于单角色单个时机内发动过的次数
----@field public broken boolean? 是否被防止了
----@field public break_reason string? 被防止了的话，是谁干的呢
-local TriggerEvent = class("TriggerEvent")
+-- SPDX-License-Identifier: GPL-3.0-or-later
+--
+-- ============================ 时机（TriggerEvent）============================
+--
+-- 一个"时机"：战斗流程走到某个时刻（回合开始、出手、伤害结算……）时，
+-- 所有挂在它上面的触发器会被依次问一遍"你要不要插一脚"。
+--
+-- 注意分清两层（详见 packages/seer-core/README.md §4）：
+--   * TriggerEvent（时机）  —— 同步。某一刻"谁想插一脚"，按优先级问一遍就返回。
+--   * GameEvent（流程事件） —— 协程。某件事"怎么一步步走完"，能停下等、能打断。
+-- 这里是**时机**，对应 freekill 的 `ltk/core/trigger_event.lua`。
+--
+-- 本文件只写**定义**（字段 + 基础辅助方法）。真正的调度逻辑（按优先级问一遍、
+-- 询问玩家、打断、refresh 前后两轮）会单独实现，因为它依赖 BattleLogic 与
+-- 触发器表，是执行层的事。
+--
+-- 与 freekill 的差异：`target` 不再是 ServerPlayer（三国杀的"角色"），而是
+-- GameObject（赛尔号里"精灵/道具/场地物件"的统一基类），见 core/gameobject.lua。
 
-function TriggerEvent:initialize(room, target, data)
-  self.room = room
+---@class TriggerEvent: Object
+---@field public id integer @ 时机编号（每次触发递增）
+---@field public logic BattleLogic @ 所属战局
+---@field public target GameObject? @ 这次时机"对准"的对象（谁掉血、谁行动……）
+---@field public data TriggerData @ 时机的附加数据（各时机有自己的 data 类）
+---@field public skill_data table<string, table<string, any>> @ 某个技能在这个时机范围内的私有数据
+---@field public finished_skills string[] @ 已经发动完的技能，不再重复检测
+---@field public invoked_times table<string, integer> @ 单个技能在单个时机内发动过的次数
+---@field public refresh_only boolean? @ 这次触发是否只执行 refresh（被打断后收尾用）
+---@field public broken boolean? @ 是否被防止 / 打断了
+---@field public break_reason string? @ 被谁打断的（技能名）
+TriggerEvent = class("TriggerEvent")
+
+---@param logic BattleLogic
+---@param target GameObject?
+---@param data TriggerData?
+function TriggerEvent:initialize(logic, target, data)
+  self.logic = logic
   self.target = target
   self.data = data
-  local logic = room.logic
-  logic.current_trigger_event_id = logic.current_trigger_event_id + 1
-  self.id = logic.current_trigger_event_id
+  if logic and logic.current_timing_id ~= nil then
+    logic.current_timing_id = logic.current_timing_id + 1
+    self.id = logic.current_timing_id
+  else
+    self.id = nil
+  end
 
   self.skill_data = {}
   self.finished_skills = {}
   self.invoked_times = {}
 end
 
----[[
-function TriggerEvent:__eq(other)
-  --经实测 global event 是TriggerSkill的event.class
-  local function eventName(obj)
-    return obj.name or obj.class.name
-  end
-  return eventName(self) == eventName(other)
-end
---]]
-
+--- 某个技能在这个时机内的私有数据（例如"这次伤害里我已经改过几次数值"）。
 ---@param skill Skill
 ---@param k string
 ---@param v any
@@ -51,162 +66,10 @@ function TriggerEvent:getSkillData(skill, k)
   return self.skill_data[name] and self.skill_data[name][k]
 end
 
----@param skill Skill
----@param v CostData|any @ cost_data，建议为键值表，```tos```(ServerPlayer[])为目标、```cards```(integer[])为牌
-function TriggerEvent:setCostData(skill, v)
-  self:setSkillData(skill, "cost_data", v)
-end
-
----@param skill Skill
----@return CostData|any
-function TriggerEvent:getCostData(skill)
-  return self:getSkillData(skill, "cost_data")
-end
-
---- 本事件是否要应该停止询问
+--- 这个时机是否应该被打断（默认否）。伤害类时机在伤害归零/被防止时会覆盖它返回 true。
+---@return boolean
 function TriggerEvent:breakCheck()
   return false
-end
-
----@param skill Skill
-function TriggerEvent:isCancelCost(skill)
-  return not not self:getSkillData(skill, "cancel_cost")
-end
-
--- 先执行带refresh的，再执行带效果的
-function TriggerEvent:exec()
-  local room, logic = self.room, self.room.logic
-  local skills = logic.skill_table[self.class] or Util.DummyTable ---@type TriggerSkill[]
-  if #skills == 0 then return false end
-
-  local _target = room.current -- for iteration
-  local player = _target
-  local event = self.class
-  local target = self.target
-  local data = self.data
-
-  repeat do
-    -- refresh skills. This should not be broken
-    for _, skill in ipairs(skills) do
-      if skill:canRefresh(self, target, player, data) and not skill.late_refresh then
-        skill:refresh(self, target, player, data)
-      end
-    end
-    player = player.next
-  end until player == _target
-
-  local cur_event = logic:getCurrentEvent() or Util.DummyTable
-  -- 如果当前事件被杀，就强制只refresh
-  -- 因为被杀的事件再进行正常trigger只可能在cleaner和exit了
-  self.refresh_only = self.refresh_only or cur_event.killed
-  local broken = false
-  if not self.refresh_only then
-
-    local prio_tab = logic.skill_priority_table[event]
-    local prev_prio = math.huge
-
-    for _, prio in ipairs(prio_tab) do
-      if broken then break end
-      if prio >= prev_prio then
-        goto continue
-      end
-
-      repeat do
-        self.invoked_times = {}
-        local triggerableLimit = {}
-        ---@param skill TriggerSkill
-        local filter_func = function(skill)
-          local invokedTimes = self.invoked_times[skill.name] or 0
-          if skill.priority ~= prio or invokedTimes == -1 then
-            return false
-          end
-
-          local times = skill:triggerableTimes(self, target, player, data)
-          if (self.invoked_times[skill.name] or 0) < times and skill:triggerable(self, target, player, data) then
-            if times > 1 then
-              triggerableLimit[skill.name] = times
-            end
-
-            return true
-          end
-
-          return false
-        end
-
-        local skill_available = table.filter(skills, filter_func)
-
-        local playerSkillFinished = false
-        while #skill_available > 0 do
-          local player_skills = {}
-          if not playerSkillFinished then
-            player_skills = table.filter(skill_available, function(s) return s:isPlayerSkill(player, true) end)
-            playerSkillFinished = #player_skills == 0
-          else
-            skill_available = table.filter(skill_available, function(s) return not s:isPlayerSkill(player, true) end)
-            if #skill_available == 0 then
-              break
-            end
-          end
-
-          local formatChoiceName = function (skill)
-            local leftTimes = (triggerableLimit[skill.name] or 1) - (self.invoked_times[skill.name] or 0)
-            if leftTimes > 1 then
-              return "#skill_muti_trigger:::" .. skill.name .. ":" .. leftTimes
-            end
-
-            return skill.name
-          end
-          local skill_name = prio <= 0 and skill_available[1].name or
-          room:askToChoice(player, { skill_name = "trigger", prompt = "#choose-trigger",
-            choices = table.map(#player_skills > 0 and player_skills or skill_available, function (skill)
-              return formatChoiceName(skill)
-            end)
-          })
-
-          if skill_name:startsWith("#skill_muti_trigger") then
-            local strSplited = skill_name:split(":")
-            skill_name = strSplited[#strSplited - 1]
-          end
-
-          local skill = Fk.skills[skill_name]
-          ---@cast skill TriggerSkill
-
-          self.invoked_times[skill.name] = (self.invoked_times[skill.name] or 0) + 1
-          broken = skill:trigger(self, target, player, data) or self:breakCheck() or cur_event.killed
-          if self:isCancelCost(skill) then
-            self.invoked_times[skill.name] = -1
-          end
-
-          if broken then
-            self.broken = true
-            self.break_reason = skill.name
-            break
-          end
-
-          skill_available = table.filter(skills, filter_func)
-        end
-
-        if broken then break end
-
-        player = player.next
-      end until player == _target
-
-      prev_prio = prio
-      ::continue::
-    end
-  end
-
-  player = _target
-  repeat do
-    for _, skill in ipairs(skills) do
-      if skill:canRefresh(self, target, player, data) and skill.late_refresh then
-        skill:refresh(self, target, player, data)
-      end
-    end
-    player = player.next
-  end until player == _target
-
-  return broken
 end
 
 return TriggerEvent
