@@ -71,7 +71,7 @@ end
 ---@param ctx table @ 结算上下文（原样传给 canTrigger / cost / use）
 function EffectHandler:trigger(timing, ctx)
   table.sort(self.queue, function(a, b)
-    return (a.effect.priority or 0) > (b.effect.priority or 0)
+    return a.effect:getPriority() > b.effect:getPriority()
   end)
 
   for _, entry in ipairs(self.queue) do
