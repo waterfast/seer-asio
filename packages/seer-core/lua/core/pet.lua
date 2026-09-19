@@ -12,15 +12,9 @@
 --
 -- ---------------------------- 只做"初始化 + getter" ----------------------------
 --
--- 这个文件刻意**很薄**：只把 spec 读进实例字段、算一次六项属性值，然后提供读字段的
--- getter。战斗里会变的东西——当前体力、能力等级（±6）、印记/异常状态、持续效果、
--- 剩余 PP、技能封印、濒死与复活、敌我阵营链接——**一行都没有**，它们全是战斗逻辑，
--- 归 `core/` 下别的文件和 `server/battle/` 管。
---
--- 为什么要把这条线划得这么死：Pet 是会被 C++ 存进 SQLite、会被日志和协议到处引用的
--- 对象。它身上每多一个"会在战斗中被改的字段"，就多一处"谁负责同步它"的不变式要维护
--- （那种 bug 不报错，只会让数值悄悄不对）。这里的 Pet 是一份**算得出来的数据快照**：
--- 给同样的 spec，永远得到同样的字段值，没有隐藏状态。
+-- 本文件读取 spec、计算初始六项属性值，保存效果挂载表与独立的能力等级表。
+-- 能力等级只提供基础 getter，具体强化效果负责写入，暂不参与面板或伤害计算。
+-- 当前体力、剩余 PP、濒死、行动与敌我关系仍由战斗逻辑管理。
 --
 -- 于是也刻意**没有**做（它们是养成/图鉴/持久化的事）：
 --   进化链、经验曲线与升级、捕获率、性别比例、稀有度、可学技能表、存档序列化。
@@ -162,11 +156,17 @@ end
 local GameObject = require "core.gameobject"
 
 ---@class Pet: GameObject
+---@field public stat_stages table<string, integer> @ 局内能力等级；初始为 0，暂不参与面板/伤害计算
 Pet = GameObject:subclass("Pet")
 
 --- 六项属性值的**字段名**，顺序固定（日志、协议、UI 都按这个顺序走）。
 --- 真正的数值在 Pet 的独立字段上（`pet.attack` 等），这张表只是"用来遍历的清单"。
 Pet.STAT_FIELDS = { "hp", "attack", "defense", "sp_attack", "sp_defense", "speed" }
+
+--- 可强化/弱化的能力项；体力不设能力等级。每只精灵保存独立的等级表。
+Pet.STAT_STAGE_FIELDS = { "attack", "defense", "sp_attack", "sp_defense", "speed", "accuracy", "evasion" }
+Pet.STAT_STAGE_MIN = -6
+Pet.STAT_STAGE_MAX = 6
 
 --- 个体值上限
 Pet.IV_MAX = 31
@@ -342,7 +342,7 @@ end
 
 --- 造一只战斗精灵：读字段 + 补默认值 + 算一次六项属性值。
 ---
---- 这里**不做**别的事：不注册进 Seer（那是 `Seer:createPet` 的事）、不碰任何战斗状态。
+--- 同时初始化独立能力等级；注册进 Seer 由 `Seer:createPet` 负责。
 ---@param spec PetSpec
 function Pet:initialize(spec)
   spec = spec or {}
@@ -361,6 +361,11 @@ function Pet:initialize(spec)
   self.name = spec.name or spec.nickname or species.name
   self.id = spec.id
   self.level = spec.level or 1
+
+  -- 能力等级属于本只精灵的局内状态，不写回种族或共享技能定义。
+  -- 这里只初始化和提供 getter；改变等级的效果负责边界，暂不接入数值计算。
+  self.stat_stages = {}
+  for _, field in ipairs(Pet.STAT_STAGE_FIELDS) do self.stat_stages[field] = 0 end
 
   -- 个体值默认 0 而**不是随机**：随机数必须由战斗逻辑自己管种子
   -- （架构文档 §2.3）。这里要随机的话，应该由调用方用 rng 现算好再传进来。
@@ -513,6 +518,22 @@ end
 ---@return integer
 function Pet:getStat(field)
   return self[field] or 0
+end
+
+--- 读取一个能力等级；未知能力项返回 0，与 getStat 的缺省读取约定一致。
+--- 与 getStat 分离：等级变化目前不会改变面板数值或伤害公式。
+---@param field string @ 见 Pet.STAT_STAGE_FIELDS
+---@return integer
+function Pet:getStatStage(field)
+  return self.stat_stages[field] or 0
+end
+
+--- 返回全部能力等级的快照，修改返回值不会改动精灵本身。
+---@return table<string, integer>
+function Pet:getStatStages()
+  local stages = {}
+  for _, field in ipairs(Pet.STAT_STAGE_FIELDS) do stages[field] = self.stat_stages[field] end
+  return stages
 end
 
 --- 六项属性值的 key -> value 快照（**给协议/UI 遍历用**）。
