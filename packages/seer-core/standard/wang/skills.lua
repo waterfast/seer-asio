@@ -10,8 +10,9 @@
 --   王·盖亚：技能:30155 / 技能:30156 / 技能:30157 / 技能:30185
 --   （https://wiki.biligame.com/seer/index.php?title=技能:<ID>&action=raw）
 --
--- 命中率的两处原文歧义（wiki 写"必中（95%）"）：这里按 Lead 的最终判定，
--- 30122 / 30185 / 30156 取 accuracy = 0（必中），19733 / 30157 取 95。
+-- 命中率歧义（wiki 写"必中（95%）"）：按 Lead 判定，30122 / 30185 / 30156 取
+-- accuracy = 0（必中；SeerAPI 记 must_hit = true，与"必中"一致），19733 / 30157 取 95。
+-- 数据已与 docs/skill-research.md（agent-research 抓取 + SeerAPI 双向核对）交叉核对一致。
 --
 -- 效果实现情况（详见 docs/unimplemented-effects.md）：
 --   19732 惊颤霹雳：+500 固定伤害——已实现
