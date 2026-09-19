@@ -5,7 +5,7 @@
 -- 接真人客户端（C++/Unity）时用的处理器。它干的事就一件：
 -- **把请求挂起，把包发出去，等外面把答复 resume 回来**。
 --
--- 这是架构文档 §5.3 那个来回的落点：
+-- 这是"对面调一次、Lua 一直算到非问人不可才回来"那个来回的落点：
 --
 --   Lua（规则）  ──yield──▶  事件管理器  ──yield──▶  logic:start() 返回 "request"
 --        ▲                                                     │
@@ -15,6 +15,12 @@
 --
 -- 它同时也是"换成 Unity 也能正常跑"的关键：**它和单机的 CliHandler 是同一套接口**
 -- （`send` / `takeReply` / `waitReply`），区别只是"答案从哪里来"。
+--
+-- ⚠ 当前状态：上面那套 `logic:start()` / `logic:resume()` / `logic.pending_request` /
+--   `logic:requireYieldable()` 都是原 `BattleLogic` 的入口，已随重构删除；
+--   新的 `GameLogic`（server/gamelogic.lua）还没有它们（它现在直接循环 `run()`，
+--   也不走 Request）。所以这里对它们一律"有就用、没有就跳过"，
+--   让这个 handler 至少能构造、能挂起，等 Request 接进 GameLogic 之后自然生效。
 
 ---@class RpcHandler: RequestHandler
 RpcHandler = RequestHandler:subclass("RpcHandler")
@@ -23,21 +29,28 @@ RpcHandler = RequestHandler:subclass("RpcHandler")
 --- 会把"当前在等谁、等的是什么"写进 `logic.pending_request`，
 --- RPC 层（session.lua）就是读它来给客户端组包的。
 ---@param request Request
----@return any @ 答复（由 logic:resume 送进来）
+---@return any @ 答复（由外面 resume 送进来）
 function RpcHandler:waitReply(request)
   local pet = request:pendingPet()
   if pet == nil then return nil end
 
-  self.logic:requireYieldable()
+  local logic = self.logic
+  if logic ~= nil and type(logic.requireYieldable) == "function" then
+    logic:requireYieldable()
+  end
   self.pending_pet = pet
 
   local payload = request:toJson(pet)
-  self.logic.pending_request = payload
+  if logic ~= nil then
+    logic.pending_request = payload
+  end
 
-  -- 真正的挂起。`logic:resume(reply)` 的 reply 就是这里的返回值。
+  -- 真正的挂起。外面把答复 resume 回来，就是这里的返回值。
   local reply = coroutine.yield("__handleRequest", payload)
 
-  self.logic.pending_request = nil
+  if logic ~= nil then
+    logic.pending_request = nil
+  end
 
   -- 答复**记在这个处理器上**，等 `Request:ask` 的等待循环下一轮轮询取走。
   -- 超时/投降这类"唤醒理由"也照记：Request:checkReply 认得 TIMER_REASON。

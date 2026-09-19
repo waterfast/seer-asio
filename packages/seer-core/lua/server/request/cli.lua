@@ -22,8 +22,7 @@
 --   `[[回车]]`     选第一个能用的技能
 --
 -- 输入/输出都是**可注入**的（`opts.input` / `opts.output`），
--- 所以单测里可以喂一串预设输入跑完整局，不用真的开终端——
--- 见 `tests/test_core.lua` 的「单机版：命令行选择技能」那一节。
+-- 所以单测里可以喂一串预设输入跑完整局，不用真的开终端。
 
 ---@class CliHandler: RequestHandler
 ---@field public input fun(prompt: string): string? @ 读一行（默认 io.read）
@@ -88,9 +87,12 @@ function CliHandler:printRequest(request, pet, payload)
 
   if payload.kind == "AskForAction" then
     out("")
+    -- 当前体力/体力上限是**战斗逻辑**的运行时状态（GameLogic 开局时挂在 pet 上，
+    -- 见 server/gamelogic.lua），Pet 自己只有"体力这一项的能力值"（pet.hp 字段名
+    -- 在 Pet 上指的是上限，见 core/pet.lua 的注释）。所以这里读不到就显示 0。
     out(("── 第 %d 回合 · 轮到 %s（%s %d/%d）──")
       :format(logic and logic.round or 0, pet.name,
-        pet.species and pet.species.name or "", pet.hp, pet.max_hp))
+        pet.species and pet.species.name or "", pet.hp or 0, pet.max_hp or 0))
     local lines = {}
     for i, name in ipairs(payload.skills or {}) do
       local sk = Seer:getSkill(name)
@@ -98,9 +100,15 @@ function CliHandler:printRequest(request, pet, payload)
       if sk then
         local parts = {}
         if (sk:getPower() or 0) > 0 then table.insert(parts, ("威力%d"):format(sk:getPower())) end
-        if sk.category == Skill.Status then table.insert(parts, "属性") end
+        if sk:isStatus() then table.insert(parts, "属性") end
         if sk:getPriority() ~= 0 then table.insert(parts, ("先制%+d"):format(sk:getPriority())) end
-        table.insert(parts, ("PP %d"):format(pet:getPP(name)))
+        -- PP 现在是**战斗逻辑**记的（`logic:getPP(pet, skill)`）；Pet 上不再有 PP
+        -- 字段，原来的 `pet:getPP(name)` 已随重构删除。
+        local pp = 0
+        if logic ~= nil and type(logic.getPP) == "function" then
+          pp = logic:getPP(pet, name)
+        end
+        table.insert(parts, ("PP %d"):format(pp))
         if payload.fifth == name then table.insert(parts, "第五技能") end
         if sk.desc then table.insert(parts, sk.desc) end
         desc = "  " .. table.concat(parts, "，")

@@ -110,14 +110,18 @@ end
 ---   * `AskForAction` 之类：返回 nil，让 `Request:_finish` 用**默认答复**
 ---     （问的人会算好"一个能打的技能"，见 logic:askForAction）；
 ---   * `AskForChoice`：优先问房间适配器（`room:askToChoice`，测试里的假房间就在这），
----     没有就选第一个选项——决策固定，所以整局可复现（架构文档 §2.3）。
+---     没有就选第一个选项——决策固定，所以整局可复现。
 ---@class DefaultHandler: RequestHandler
 DefaultHandler = RequestHandler:subclass("DefaultHandler")
 
 function DefaultHandler:send(request, pet)
-  if request.command == "AskForChoice" and self.logic ~= nil
-    and type(self.logic.room.askToChoice) == "function" then
-    self.replies[pet] = self.logic.room:askToChoice(pet, request.data[pet])
+  -- `logic.room` 是**可选**的适配器（GameLogic 的 `opts.room`，见
+  -- server/gamelogic.lua）：没给 room、或者那个 room 没实现 askToChoice 时，
+  -- 就什么都别放，交给 `Request:_finish` 填默认答复。所以这里必须逐级判空。
+  local room = self.logic and self.logic.room
+  if request.command == "AskForChoice" and type(room) == "table"
+    and type(room.askToChoice) == "function" then
+    self.replies[pet] = room:askToChoice(pet, request.data[pet])
     return
   end
   -- 其余情况交给默认答复：这里什么都不放，`Request:_finish` 会填

@@ -21,6 +21,18 @@
 -- 我们的 `Pet` 上没有反向引用（故意的：精灵不该知道自己属于哪一局），
 -- 所以构造时**显式传 logic**。
 --
+-- ---------------------------- 当前状态：还没接进 GameLogic ----------------------------
+--
+-- ⚠ 重构后 `GameLogic`（server/gamelogic.lua）**还没有**这一层：
+--   * 它选行动用的是内置的 `pickAction`（见那里的 TODO），不走 `Request`；
+--   * 它没有 `getRequestHandler` / `request_timeout` / `current_request` /
+--     `pending_request` / `requireYieldable` / `resume` 这些入口（原来的
+--     `BattleLogic` 有，已经随重构删掉了）。
+--   所以下面凡是要"从 logic 拿处理器"的地方都做了退化处理：拿不到处理器时，
+--   这次询问直接按"没人回答"收尾，用各参与者登记的**默认答复**
+--   （`Request:_finish` 的兜底）。整条链要真正跑起来，得先把 Request 接进
+--   GameLogic 的回合循环。
+--
 -- ---------------------------- 三种特殊答复 ----------------------------
 --
 -- freekill 用三个魔法字符串表示"不是正常答复"，这里照抄（换成常量，别散字面量）：
@@ -140,7 +152,11 @@ function Request:toJson(pet)
   pet = pet or self:pendingPet() or self.players[1]
   local payload = table.simpleClone(self.data[pet] or {})
   payload.kind = self.command
-  payload.pet = pet.seat
+  -- 目标标识：**Pet 上已经没有 seat/side 了**（见 core/pet.lua 的字段清单）。
+  -- 座位是开战时战斗逻辑临时挂上去的运行时字段（`GameLogic:_defaultSides` 里
+  -- `p.side = 1; p.seat = i`），所以这里读得到就用座位、读不到退化成名字
+  -- （Seer.pets 的键也是名字）。
+  payload.pet = pet.seat or pet.name
   payload.name = payload.name or pet.name
   payload.seq = self.seq
   payload.timestamp = self.timestamp
@@ -189,9 +205,10 @@ function Request:ask()
 
   -- 告诉外面"现在在等这几个人"（freekill 的 notifyMoveFocus）：
   -- 客户端拿它显示"思考中…"的焦点和倒计时；单机版不关心，忽略即可。
+  -- （`notify` 在 GameLogic 上有；`pets` 用座位号，还没分配座位时退化成名字。）
   self.logic:notify{
     type = "MoveFocus",
-    pets = table.map(self.players, function(p) return p.seat end),
+    pets = table.map(self.players, function(p) return p.seat or p.name end),
     text = self.focus_text or self.command,
     timeout = self.timeout,
   }
@@ -199,6 +216,21 @@ function Request:ask()
   -- 发出去。就地作答的处理器（AI、脚本化的 CLI）在这一步就有答案了。
   for _, pet in ipairs(self.players) do
     if self.result[pet] == nil then self:sendTo(pet) end
+  end
+
+  -- 一个能拿到处理器的都没有（当前 GameLogic 就是这样，见 handlerFor）：
+  -- 直接按默认答复收尾，不要在下面的轮询里空转 MAX_WAIT_ROUNDS 圈。
+  local any_handler = false
+  for _, pet in ipairs(self.players) do
+    if self:handlerFor(pet) ~= nil then any_handler = true break end
+  end
+  if not any_handler then
+    Log.warning(("%s 没有任何可用的答复者（logic 还没接 Request 层），全部改用默认答复")
+      :format(self.command))
+    self:_finish()
+    self.logic.current_request = nil
+    self.logic.last_request = self
+    return
   end
 
   local rounds = 0
@@ -239,17 +271,27 @@ end
 
 -- ---------------------------- 和处理器打交道 ----------------------------
 
+--- 取这只精灵的答复者（谁去答）。
+---
+--- ⚠ `logic:getRequestHandler(pet)` 是原 `BattleLogic` 的入口，新的 `GameLogic`
+--- （server/gamelogic.lua）**还没有**——它现在不走 Request（见文件头的"当前状态"）。
+--- 所以这里拿不到就返回 nil，调用方一律按"没人回答"处理：这次询问走
+--- `Request:_finish` 的默认答复兜底，不会因为缺一层就炸掉整局。
 ---@param pet Pet
----@return RequestHandler
+---@return RequestHandler?
 function Request:handlerFor(pet)
-  return self.logic:getRequestHandler(pet)
+  local logic = self.logic
+  if logic == nil or type(logic.getRequestHandler) ~= "function" then
+    return nil
+  end
+  return logic:getRequestHandler(pet)
 end
 
 --- 把问题交给这只精灵的答复者
 ---@param pet Pet
 function Request:sendTo(pet)
   local handler = self:handlerFor(pet)
-  if type(handler.send) ~= "function" then return end
+  if handler == nil or type(handler.send) ~= "function" then return end
   handler.pending_pet = pet
   handler:send(self, pet)
 end
@@ -260,6 +302,7 @@ end
 ---@return any @ nil = 还没答
 function Request:checkReply(pet)
   local handler = self:handlerFor(pet)
+  if handler == nil then return nil end
   local reply = handler:consumeReply(self, pet)
   if reply == nil then return nil end
   if reply == Request.NOT_READY then return nil end
@@ -273,14 +316,14 @@ function Request:checkReply(pet)
 end
 
 --- 挂起等外面回话。挂起点是**处理器**决定的：
----   * RpcHandler：`coroutine.yield` 出去，等 C++/Unity 调 `logic:resume(reply)`；
+---   * RpcHandler：`coroutine.yield` 出去，等外面调 `logic:resume(reply)`；
 ---   * CLI：读一行输入（同步阻塞，不挂起）；
 ---   * AI / 无头：什么都不做（它们在上一步就答完了）。
 function Request:waitReply()
   local pet = self:pendingPet()
   if pet == nil then return end
   local handler = self:handlerFor(pet)
-  if type(handler.waitReply) ~= "function" then return end
+  if handler == nil or type(handler.waitReply) ~= "function" then return end
   handler:waitReply(self)
 end
 
@@ -310,7 +353,7 @@ function Request:_finish()
     end
 
     local handler = self:handlerFor(pet)
-    if type(handler.finish) == "function" then handler:finish(self) end
+    if handler ~= nil and type(handler.finish) == "function" then handler:finish(self) end
   end
 end
 
