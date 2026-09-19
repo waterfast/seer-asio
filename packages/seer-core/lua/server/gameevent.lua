@@ -1,10 +1,43 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+--
+-- ============================ 流程事件（GameEvent）============================
+--
+-- freekill-core `lua/server/game_event.lua` 的移植：一套**协程**式的流程框架，
+-- 和 core/trigger_event.lua 的"时机"是两层东西：
+--
+--   TriggerEvent（时机）  —— 同步。某一刻"谁想插一脚"，按优先级问一遍就返回。
+--   GameEvent（流程事件） —— 协程。某件事"怎么一步步走完"，能停下等、能被打断。
+--
+-- ---------------------------- 当前状态（必读）----------------------------
+--
+-- ⚠ 本文件现在**只是能 require**，还没有接进战斗流程：重构后的 `GameLogic:run()`
+--   是直接循环跑完整局的（见 server/gamelogic.lua），没有走 GameEvent 这套栈。
+--   要真的用起来，GameLogic 上还缺 freekill 那套支撑（见下面各处的 TODO）：
+--     logic:getCurrentEvent() / logic:pushEvent(e) / logic:resumeEvent(...)
+--     logic.game_event_stack / logic.cleaner_stack / logic.event_recorder
+--     logic.all_game_events / logic.current_event_id
+--   这些在原 BattleLogic 里有、在新的 GameLogic 上**还没有**，所以下面凡是用到
+--   它们的地方都做了"有就用、没有就退化"的处理，不会当场炸。
+--
+-- ---------------------------- 清掉了什么 ----------------------------
+--
+-- 这份文件原来带着大量 freekill（三国杀）的东西，本项目里**不存在**，已删除：
+--
+--   * `RoomInstance`（全局房间单例）—— 改成由调用方显式传"战局容器"（见 initialize）；
+--   * `Fk`（全局引擎）—— `Fk:currentRoom()` / `Fk:translate` / `Fk:getCardById`
+--     全是三国杀那套，连带整个 `parseMsg`（把 LogMessage 渲染成人话）一起删了；
+--   * `Card` / `ServerPlayer` / `general` / `deputyGeneral` / `seat#` —— 同上；
+--   * `Pcall` → 标准库 `pcall`（原来那个是 freekill 的全局包装）。
+--
+-- TODO：日志文本渲染（getDesc）现在退化成最朴素的输出，等本项目的
+--   日志/回放格式定下来之后再重写一份。
 
 ---@class GameEvent: Object
 ---@field public id integer @ 事件的id，随着时间推移自动增加并分配给新事件
 ---@field public end_id integer @ 事件的对应结束id，如果整个事件中未插入事件，那么end_id就是自己的id
----@field public room Room @ room实例
----@field public event GameEvent @ 该事件对应的EventType，现已改为对应的class
+---@field public room any @ 战局容器：GameLogic，或会话层给的 room 适配器
+---@field public logic any @ 逻辑层（= room.logic；若 room 本身就是 GameLogic，则就是它）
+---@field public event any @ 该事件对应的EventType，现已改为对应的class
 ---@field public data any @ 事件的附加数据，视类型而定
 ---@field public parent GameEvent @ 事件的父事件（栈中的上一层事件）
 ---@field public extra_clear fun(self:GameEvent)[] @ 事件结束时执行的自定义函数列表
@@ -13,8 +46,7 @@
 ---@field public status string @ ready, running, exiting, dead
 ---@field public interrupted boolean @ 事件是否是因为被中断而结束的，可能是防止事件或者被杀
 ---@field public killed boolean @ 事件因为终止一切结算而被中断（所谓的“被杀”）
-----@field public desc fun(self:GameEvent):LogMessage @ LogMessage形式的描述
-----@field public getDesc fun(self:GameEvent):string @ 获得描述
+---@field public desc fun(self:GameEvent):table @ 描述（纯数据，渲染交出去）
 local GameEvent = class("GameEvent")
 
 ---@type (fun(self: GameEvent): boolean?)[]
@@ -31,10 +63,17 @@ GameEvent.exit_funcs = {}
 
 local dummyFunc = Util.DummyFunc
 
-function GameEvent:initialize(event, ...)
+---@param event any @ 事件类型（已经是 class，见文件头）
+---@param room? any @ 战局容器：GameLogic，或会话层给的 room 适配器
+---   （原来是全局 `RoomInstance`——那是 freekill 的房间单例，本项目没有）
+function GameEvent:initialize(event, room, ...)
   self.id = -1
   self.end_id = -1
-  self.room = RoomInstance
+  self.room = room
+  -- logic 的取法对两种调用方都成立：
+  --   * 传进来的是会话层的 room 适配器（`room.logic` 是 GameLogic）→ 取它；
+  --   * 直接传 GameLogic（它自己没有 .logic 字段）→ 就是它。
+  self.logic = (type(room) == "table" and room.logic) or room
   -- for compat
   self.event = event
   ---@diagnostic disable-next-line
@@ -87,104 +126,22 @@ function GameEvent:desc()
   return { type = "#GameEvent" }-- .. (type(self.event == "string") and self.event or self.class.name)
 end
 
----@param msg LogMessage
-local function parseMsg(msg, nocolor, visible_data)
-  local self = Fk:currentRoom()
-  local data = msg
-  local function getPlayerStr(pid, color)
-    if nocolor then color = "white" end
-    if not pid then
-      return ""
-    end
-    local p = self:getPlayerById(pid)
-    local str = '<font color="%s"><b>%s</b></font>'
-    if p.general == "anjiang" and (p.deputyGeneral == "anjiang"
-      or not p.deputyGeneral) then
-      local ret = Fk:translate("seat#" .. p.seat)
-      return string.format(str, color, ret)
-    end
-
-    local ret = p.general
-    ret = Fk:translate(ret)
-    if p.deputyGeneral and p.deputyGeneral ~= "" then
-      ret = ret .. "/" .. Fk:translate(p.deputyGeneral)
-    end
-    for _, p2 in ipairs(Fk:currentRoom().players) do
-      if p2 ~= p and p2.general == p.general and p2.deputyGeneral == p.deputyGeneral then
-        ret = ret .. ("[%d]"):format(p.seat)
-        break
-      end
-    end
-    ret = string.format(str, color, ret)
-    return ret
-  end
-
-  local from = getPlayerStr(data.from, "#0C8F0C")
-
-  ---@type any
-  local to = data.to or Util.DummyTable
-  local to_str = {}
-  for _, id in ipairs(to) do
-    table.insert(to_str, getPlayerStr(id, "#CC3131"))
-  end
-  to = table.concat(to_str, ", ")
-
-  ---@type any
-  local card = data.card or Util.DummyTable
-  local allUnknown = true
-  local unknownCount = 0
-  for _, id in ipairs(card) do
-    local known = id ~= -1
-    if visible_data then known = visible_data[tostring(id)] end
-    if known then
-      allUnknown = false
-    else
-      unknownCount = unknownCount + 1
-    end
-  end
-
-  if allUnknown then
-    card = ""
-  else
-    local card_str = {}
-    for _, id in ipairs(card) do
-      local known = id ~= -1
-      if visible_data then known = visible_data[tostring(id)] end
-      if known then
-        table.insert(card_str, Fk:getCardById(id, true):toLogString())
-      end
-    end
-    if unknownCount > 0 then
-      local suffix = unknownCount > 1 and ("x" .. unknownCount) or ""
-      table.insert(card_str, Fk:translate("unknown_card") .. suffix)
-    end
-    card = table.concat(card_str, ", ")
-  end
-
-  local function parseArg(arg)
-    arg = arg or ""
-    arg = Fk:translate(arg)
-    arg = string.format('<font color="%s"><b>%s</b></font>', nocolor and "white" or "#0598BC", arg)
-    return arg
-  end
-
-  local arg = parseArg(data.arg)
-  local arg2 = parseArg(data.arg2)
-  local arg3 = parseArg(data.arg3)
-
-  local log = Fk:translate(data.type)
-  log = string.gsub(log, "%%from", from)
-  log = string.gsub(log, "%%to", to)
-  log = string.gsub(log, "%%card", card)
-  log = string.gsub(log, "%%arg2", arg2)
-  log = string.gsub(log, "%%arg3", arg3)
-  log = string.gsub(log, "%%arg", arg)
-  return log
-end
---- 获得Log描述
+-- TODO：这里原来是 freekill 的 `parseMsg`——把 LogMessage 渲染成带颜色、
+-- 带武将名/卡牌名的中文串（`Fk:currentRoom` / `getPlayerById` / `Fk:translate` /
+-- `Fk:getCardById` / general / deputyGeneral 全是三国杀那套，本项目里都不存在，
+-- 已整块删除）。本项目的日志/回放文本格式还没定，先退化成"把 desc 的数据直接转字符串"。
+--- 获得描述（纯数据 → 字符串）
 ---@return string
 function GameEvent:getDesc()
-  return parseMsg(self:desc())
+  local d = self:desc()
+  if type(d) == "table" then
+    local parts = {}
+    for _, k in ipairs({ "type", "from", "to", "arg", "arg2", "arg3" }) do
+      if d[k] ~= nil then table.insert(parts, ("%s=%s"):format(k, tostring(d[k]))) end
+    end
+    return #parts > 0 and table.concat(parts, " ") or tostring(self)
+  end
+  return tostring(d)
 end
 
 function GameEvent:prepare()
@@ -298,11 +255,18 @@ end
 ---@param endEvent? GameEvent @ 区间终止点，默认为本事件结束
 ---@return T[] @ 找到的符合条件的所有事件，最多n个但不保证有n个
 function GameEvent:searchEvents(eventType, n, func, endEvent)
-  local logic = self.room.logic
+  -- TODO(流程栈未移植)：`event_recorder` / `all_game_events` 是原 BattleLogic 上的
+  -- 事件记录表，新的 GameLogic 还没有（它现在是直接循环，不走 GameEvent）。
+  -- 这里做"有就用、没有就返回空"的退化处理，免得一调就炸。
+  local logic = self.logic
+  if logic == nil or logic.event_recorder == nil then
+    Log.warning("GameEvent:searchEvents 需要 logic.event_recorder（本项目尚未移植），返回空结果")
+    return {}
+  end
   local events = logic.event_recorder[eventType] or Util.DummyTable
   local from = self.id
   local to = endEvent and endEvent.id or self.end_id
-  if math.abs(to) == 1 then to = #logic.all_game_events end
+  if math.abs(to) == 1 then to = #(logic.all_game_events or {}) end
   n = n or 1
   func = func or Util.TrueFunc
 
@@ -323,9 +287,17 @@ function GameEvent:searchEvents(eventType, n, func, endEvent)
 end
 
 function GameEvent:exec()
-  local room = self.room
-  local logic = room.logic
+  local logic = self.logic
   if self.status ~= "ready" then return true end
+
+  -- TODO(流程栈未移植)：`getCurrentEvent` / `pushEvent` / `resumeEvent` 与事件栈
+  -- （game_event_stack / cleaner_stack）都在原 BattleLogic 上，新的 GameLogic
+  -- （server/gamelogic.lua，直接循环跑整局）还没有它们。没有栈就没法挂事件，
+  -- 所以这里明确报错而不是装作没事——调用方现在本来也还没有地方调它。
+  if logic == nil or type(logic.getCurrentEvent) ~= "function"
+    or type(logic.pushEvent) ~= "function" then
+    error("GameEvent:exec 需要 logic:getCurrentEvent()/pushEvent()（事件栈尚未移植到 GameLogic）", 2)
+  end
 
   self.parent = logic:getCurrentEvent()
 
@@ -340,10 +312,10 @@ function GameEvent:exec()
   coroutine.yield(self, "__newEvent")
   -- 事件的处理流程请看GameLogic:resumeEvent
 
-  Pcall(self.exit, self)
+  pcall(self.exit, self)
   for _, f in ipairs(self.extra_exit) do
     if type(f) == "function" then
-      Pcall(f, self)
+      pcall(f, self)
     end
   end
 
@@ -362,14 +334,21 @@ end
 local Game = GameEvent:subclass("GameEvent.Game")
 
 function Game:__tostring()
-  return string.format("<Game %s #%d>", Fk:currentRoom():getSettings('gameMode'), self.id)
+  -- 原来打的是 `Fk:currentRoom():getSettings('gameMode')`（freekill 的三国杀模式名）。
+  -- 本项目没有 Fk，也没有"模式"这个概念，退化成一个能表示身份的串。
+  return string.format("<Game %s #%d>",
+    self.logic ~= nil and tostring(self.logic) or "?", self.id)
 end
 
 function Game:main()
+  -- 原来这里是 room.game_started / room:doBroadcastNotify("StartGame") /
+  -- room.logic:run()——前两个是 freekill 的房间接口，本项目没有。
+  -- 等价物就是"把战局交给 GameLogic 跑"（失败原因/胜负由 logic 自己记）。
   local room = self.room
-  room.game_started = true
-  room:doBroadcastNotify("StartGame", "")
-  room.logic:run()
+  if type(room) == "table" and rawget(room, "game_started") ~= nil then
+    room.game_started = true
+  end
+  self.logic:run()
 end
 
 ---@class GameEvent.ClearEvent : GameEvent
@@ -377,14 +356,22 @@ end
 local ClearEvent = GameEvent:subclass("GameEvent.ClearEvent")
 function ClearEvent:main()
   local event = self.data
-  local logic = self.room.logic
+  local logic = self.logic
   -- 不可中断
-  Pcall(event.clear, event)
+  pcall(event.clear, event)
   for _, f in ipairs(event.extra_clear) do
-    if type(f) == "function" then Pcall(f, event) end
+    if type(f) == "function" then pcall(f, event) end
   end
 
-  -- cleaner顺利执行完了，出栈吧
+  -- TODO(流程栈未移植)：`current_event_id` / `all_game_events` / `game_event_stack` /
+  -- `cleaner_stack` 都是原 BattleLogic 的事件栈，新的 GameLogic 上还没有（见 exec 的 TODO）。
+  -- 没有栈就没法出栈，所以这里退化：只把 event.end_id 收成自己，栈的部分跳过。
+  if logic == nil or type(logic.game_event_stack) ~= "table" then
+    Log.warning("ClearEvent:main 需要 logic 的事件栈（尚未移植），跳过出栈")
+    event.end_id = event.id
+    return
+  end
+
   local end_id = logic.current_event_id + 1
   if event.id ~= end_id - 1 then
     logic.all_game_events[end_id] = event.event
