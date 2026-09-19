@@ -39,17 +39,17 @@ seer-asio/
 ├── packages/
 │   └── seer-core/             # Lua 侧战斗核（战斗大脑，纯 Lua 5.4）
 │       ├── lua/seer.lua       #   载入入口
-│       ├── lua/core/          #   基类：timing(时机)/trigger_data/skill/effect/pet/registry
-│       ├── lua/server/battle/ #   timing 时机表 / game_event 流程事件基类
-│       │                      #   hp 生命值流程 / gameflow 回合流程
-│       │                      #   logic 事件管理器 / damage 伤害 / element 克制
-│       ├── lua/server/rpc/    #   给 C++ 的 RPC 方法表（传输层留给项目 6）
-│       ├── lua/specs/         #   图鉴与技能的声明式数据（spec）
-│       ├── lua/server/rpc/    #   RPC（jsonrpc/stdio/peer/dispatchers/entry，抄自新月杀）
-│       ├── lua/specs/standard/#   雷伊（电系）/ 盖亚（战斗系），图鉴真实数据
-│       ├── examples/         #   battle_demo（跑一局看战报）/ rpc_demo（跨进程 RPC）
-│       ├── tests/test_core.lua#   870 项单跑测试（不需要 C++）
-│       └── README.md          #   设计说明、两层事件的说明、名词对照表
+│       ├── lua/core/          #   基类：engine(注册表 Seer)/skill/pet/gameobject
+│       │                      #   trigger_event(时机基类)/elements(属性克制)
+│       │   ├── events/        #   时机：TriggerData 基类 + 18 个时机类
+│       │   ├── effect/        #   效果：effect.lua（⚠ 没有 init.lua，待补）
+│       │   └── mark/          #   印记/异常状态：⚠ 待重建，暂不加载
+│       ├── lua/server/gamelogic.lua  # 战斗逻辑 GameLogic（run() = 整局主循环）
+│       ├── lua/server/gameevent.lua  # 流程事件基类（协程；事件栈尚未移植）
+│       ├── lua/server/rpc/    #   RPC（jsonrpc/stdio/peer/dispatchers/entry）
+│       ├── lua/server/request/#   询问机制：Request + 处理器（命令行/AI/RPC）
+│       ├── lua/specs/standard/#   雷伊（电系）/ 盖亚（战斗系）两个纯数据包
+│       └── README.md          #   设计说明 + 「重构后仍然缺的东西」清单
 └── tests/
     ├── smoke_test.py           # 冒烟测试（19 项，真的起服务端连客户端）
     └── pty_session.py          # 伪终端交互测试

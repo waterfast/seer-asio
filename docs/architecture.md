@@ -2,6 +2,23 @@
 
 > 这是**架构规划文档**，不是实现。目标是先想清楚"长什么样、谁负责什么、两边怎么说话"，
 > 让后续每一步实现都有据可依。会随开发持续修订。
+>
+> ## ⚠️ 本文档描述的是**重构前**的状态，以代码为准
+>
+> 正在进行的重构已经改掉了下面这些（本文件只在关键处做了标注，没有逐节重写）：
+>
+> * `packages/seer-core/lua/core/registry.lua` → **`core/engine.lua`**；
+>   `core/timing.lua` / `core/trigger_data.lua` → **`core/trigger_event.lua` +
+>   `core/events/`（TriggerData 基类 + 18 个时机类）**——不是本文档别处说的"31 个时机"；
+> * **`server/battle/` 整个目录已删除**：现在是 `server/gamelogic.lua`（`GameLogic`，
+>   `run()` 直接循环跑完整局）+ `server/gameevent.lua`（协程式流程事件基类，**待接**）；
+> * `SkillSet` / `TriggerSkill` / `SkillSkeleton` / `core/effect/kinds.lua`
+>   （效果类型注册表）**已删除**；`core/mark/*`（印记/异常状态）**整体待重建**；
+> * `Pet` 上的战斗状态（当前体力 / 能力等级 / 印记 / PP / 封印 / 濒死 / side / seat）
+>   **已全部删除**；`examples/` 与 `tests/test_core.lua` 也已删除。
+>
+> 当前真实结构与本轮清理后"还缺什么"，看 `packages/seer-core/README.md` 的 §1 / §1.1
+> 与 `packages/seer-core/lua/seer.lua` 的文件头。
 
 ---
 
@@ -205,14 +222,23 @@ Lua 出规则、C++ 出 IO，本 spec 基本沿用并简化它。
 
 **目前实现到哪一步**（细节见 `packages/seer-core/README.md`）：
 
-- ✅ **两层事件都做了**（这一点很关键，见下）：
-  * **时机**（`core/timing.lua`）照抄 freekill 的 `core/trigger_event.lua`：优先级降序、
-    refresh 前后两轮、`breakCheck` 打断、单精灵单时机次数上限、问玩家取选项；
-  * **流程事件**（`server/battle/game_event.lua`）照抄 freekill 的 `lua/server/gameevent.lua`：
-    协程、能插入子事件、能被打断、能停下来等外部回话，还有清场事件（ClearEvent）
-    负责"必须发生的收尾"。
-- ✅ 技能/效果/精灵都是 **spec 驱动**的：规则作者只写声明式表，核心负责造对象。
-  效果类型和异常状态都是可注册的数据，加玩法不用改核心。
+> ⚠️ 已过时：下面这一节描述的是重构前的两层事件实现，**已不成立**——
+> 时机现在是 `core/trigger_event.lua` + `core/events/`（18 个时机类，基类只管定义，
+> 调度在 `GameLogic:trigger` 里按优先级跑一遍）；**流程事件（GameEvent）的事件栈
+> 还没有移植进新的 `GameLogic`**，`server/gameevent.lua` 目前只保证能 require。
+> 面向玩家的"问选择"（Request 层）也还没接进回合循环。
+
+- ⬜ **两层事件**（重构中）：
+  * **时机**：`core/trigger_event.lua`（TriggerEvent 基类）+ `core/events/`（18 个时机类）；
+    `GameLogic:trigger` 按优先级降序跑一遍。原来那套 refresh 两轮 / 打断计数 /
+    问玩家取选项还没搬回来；
+  * **流程事件**：`server/gameevent.lua`（协程、ClearEvent）——**能 require，但没接进流程**：
+    `logic:getCurrentEvent/pushEvent/resumeEvent`、`game_event_stack` 这些原 BattleLogic
+    的入口在新的 `GameLogic` 上还不存在。
+- ✅ 技能/精灵是 **spec 驱动**的：规则作者只写声明式表，核心负责造对象。
+- ⬜ 效果（Effect）只有类 + `Seer:createEffect` 这个创建入口，
+  **执行/挂载那一层还没重建**；效果类型注册表（旧 `core/effect/kinds.lua`）已删除；
+  异常状态（`core/mark/*`）待重建。
 - ✅ 生命值与回合的流程（照 freekill 的 `hp.lua` / `gameflow.lua`）：
   `ChangeHp`（唯一改 hp 的入口）/ `Damage` / `Recover`、
   `Round`（一大回合）/ `Turn`（一次行动）/ `UseSkill`。
@@ -275,16 +301,19 @@ seer-asio/
 ├── packages/
 │   └── seer-core/               # Lua 战斗规则（对应 freekill 的 packages/freekill-core）✅ 已落地
 │       ├── lua/seer.lua         #   载入入口（对应 freekill.lua + fk_ex.lua）
-│       ├── lua/core/            #   基类：timing(时机) / trigger_data / skill / pet / registry
-│       │   ├── effect/          #   效果：init(Effect 类) + kinds(内置效果类型 = 注册点)
-│       │   └── mark/            #   印记：init(基类) + status(异常状态类) + buff(增益印记类)
-│       ├── lua/server/battle/   #   game_event 流程事件基类 / hp 生命值 / gameflow 回合
-│       │                        #   timing 时机表 / logic 事件管理器 / damage / element
+│       ├── lua/core/            #   基类：engine(注册表 Seer) / skill / pet /
+│       │                        #   trigger_event(时机基类) / elements(属性克制) / gameobject
+│       │   ├── events/          #   时机：TriggerData 基类 + 18 个时机类
+│       │   │                    #   （gameflow 流程类 / attack 出手与伤害链）
+│       │   ├── effect/          #   效果：effect.lua（Effect 类；⚠ 没有 init.lua）
+│       │   └── mark/            #   印记：init + status + buff —— ⚠ 待重建，暂不加载
+│       ├── lua/server/gamelogic.lua # 战斗逻辑 GameLogic：run() 就是整局主循环
+│       ├── lua/server/gameevent.lua # 流程事件基类（协程；事件栈尚未移植）
 │       ├── lua/server/request/  #   询问机制：Request + 处理器（命令行/AI/RPC）
-│       ├── lua/server/rpc/      #   RPC 方法表（传输层未实现，属于项目 6）
+│       ├── lua/server/rpc/      #   RPC：jsonrpc / stdio / peer / dispatchers / entry
 │       ├── lua/specs/           #   图鉴与技能的声明式数据（spec），可由扩展包替换
-│       │                        #   standard/：雷伊与盖亚 + 包内自造效果/技能的样板
-│       └── tests/test_core.lua  #   "单跑 Lua 脚本"的测试入口（870 项，不需要 C++）
+│       │                        #   standard/：雷伊与盖亚（纯数据；旧 demo/effects 已删）
+│       └── lua/seer.lua         #   也是"加载自检"的入口：lua5.4 lua/seer.lua
 ├── server/                      # SQL 建表脚本
 └── tests/                       # C++ 侧的冒烟/交互测试
 ```
