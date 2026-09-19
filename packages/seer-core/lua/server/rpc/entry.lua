@@ -9,18 +9,19 @@
 -- ```bash
 -- # 手动起来看看（它会先打一条 hello，然后等消息）
 -- cd packages/seer-core && lua5.4 lua/server/rpc/entry.lua
---
--- # 或者让 examples/rpc_demo.lua 拉起它、驱动一整局：
--- lua5.4 examples/rpc_demo.lua
 -- ```
 --
 -- ---------------------------- 这一层现在到哪一步了 ----------------------------
 --
--- ✅ 能跑的：JSON-RPC 2.0（也支持 `SEER_RPC_MODE=cbor` 切 CBOR）、stdio 分帧、
---    请求/响应/通知、阻塞式调用（等答复期间照常服务对面的请求，不会互相堵死）、
---    方法表（dispatchers）、信号出口（peer）、会话管理（session）。
--- ⬜ 没做的：**真正的 C++ 那一端**。我们现在用另一个 Lua 进程当"对面"
---    （见 examples/rpc_demo.lua），所以整条链路是真的，只是对面还不是 C++。
+-- ✅ 能 require / 能起来的：JSON-RPC 2.0（也支持 `SEER_RPC_MODE=cbor` 切 CBOR）、
+--    stdio 分帧、请求/响应/通知、阻塞式调用、方法表（dispatchers）、
+--    信号出口（peer）、会话管理（session）。
+-- ⬜ 没做的：
+--    * **真正的 C++ 那一端**（对面现在还得自己写一个 JSON-RPC 客户端来驱动；
+--      原来仓库里那两个示例脚本 `examples/rpc_demo.lua` / `examples/*_demo.lua`
+--      已随重构删除——它们整份是基于已删除的 API 写的）；
+--    * **交互式询问**：`GameLogic` 还没接 Request 层，所以 `runGame` 是一跑到底、
+--      `handlePlayerAction` 返回 not_implemented（见 server/rpc/dispatchers.lua）。
 --
 -- ---------------------------- 为什么日志走 stderr ----------------------------
 --
@@ -42,7 +43,7 @@ package.path = table.concat({
 }, ";")
 
 -- ---------------------------- 载入核心 ----------------------------
--- 注意顺序：seer.lua 会把核心类挂成全局（Skill / Pet / BattleLogic / GameEvent…），
+-- 注意顺序：seer.lua 会把核心类挂成全局（Skill / Pet / GameLogic / GameEvent…），
 -- 之后 dispatchers.lua / session.lua 才能直接用它们。
 local SeerCore = dofile(ROOT .. "/lua/seer.lua")
 

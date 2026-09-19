@@ -14,8 +14,12 @@
 -- 前者是协议里的一条 error（对面能优雅处理），后者是 internal_error（对面该报警）。
 --
 -- 另外：这里的方法都是**同步**的（阻塞式 RPC，freekill 的 README 论证过够用）。
--- 唯一"会停下来等"的是玩家操作——但它不是在这里等，而是 Lua 内部挂起
--- （见 logic:start()/resume 与 peer.call），所以这个方法本身也是立刻返回的。
+-- ⚠ 重构后 `GameLogic:run()` 是**一跑到底**的（直接循环，内部 `pickAction` 自动选招，
+--   见 server/gamelogic.lua 的 TODO），原来那套"跑到要问人就停下"的
+--   `logic:start()` / `logic:resume(reply)` 已随 `BattleLogic` 一起删除。所以现在：
+--     * `runGame`            —— 一次把整局跑完，返回 finished 结果；
+--     * `handlePlayerAction` —— 没有挂起点可以恢复，明确返回 not_implemented。
+--   等 Request 层接进 GameLogic 之后，这两个方法再按原来的形状补回来。
 
 local Dispatchers = {}
 
@@ -59,62 +63,36 @@ function Dispatchers.startGame(params)
   return true, Session.describe(session_or_err)
 end
 
---- 开跑：一直跑到"需要玩家决定"或者"打完"，把下一件事返回给对面。
+--- 开跑：把这一局跑到结束，把结果返回给对面。
 ---
---- 这就是"Lua 是大脑"的入口：对面调一次，Lua 会一直算到**非问人不可**才回来。
+-- 这就是"Lua 是大脑"的入口。**当前实现一跑到底**：`GameLogic:run()` 会一直循环到
+-- 分出胜负才返回，不像原来那样在"需要玩家决定"的地方停下——因为 GameLogic
+-- 还没接 Request 层（见文件头说明与 server/gamelogic.lua 的 TODO）。
 function Dispatchers.runGame(params)
   local session, err = Session.get(params and params.roomId)
   if session == nil then return false, "invalid_params", err end
 
-  session.logic.interactive = true
-  local kind = session.logic:start()
-  return true, Session.next_task(session, kind)
+  session.logic:run()
+  return true, Session.next_task(session, "finished")
 end
 
---- 玩家操作（架构文档 §5.5）。
+--- 玩家操作。
 --- 把玩家的选择翻译成挂起点期待的那个答复，让 Lua 继续跑，返回下一件要问的事。
+---
+--- TODO(交互式询问未接)：原来的实现是
+---     local request = logic.pending_request   -- 现在挂着等谁答
+---     ... 把 action 翻成 reply ...
+---     local kind = logic:resume(reply)
+--- 但 `pending_request` / `resume` 都是原 `BattleLogic` 的入口，重构后已经没有了
+--- （新的 GameLogic 一跑到底，不会停在"等玩家操作"的地方）。所以这里明确报
+--- not_implemented，而不是去调一堆不存在的函数。
 ---@param params table @ `{ roomId, playerId, action = { type = "UseSkill", skillName|skillId, targetId } }`
 function Dispatchers.handlePlayerAction(params)
   local session, err = Session.get(params and params.roomId)
   if session == nil then return false, "invalid_params", err end
 
-  local logic = session.logic
-  local request = logic.pending_request
-  if request == nil then
-    return false, "server_error", "当前没有在等玩家操作（先调 runGame）"
-  end
-
-  local action = params.action or {}
-  local reply
-
-  if request.kind == "AskForAction" then
-    if action.type == "UseSkill" then
-      local skill = (action.skillName and seer():getSkill(action.skillName))
-        or (action.skillId and seer():getSkillById(action.skillId))
-      if skill == nil then
-        return false, "invalid_params", ("技能 %s 不存在"):format(
-          tostring(action.skillName or action.skillId))
-      end
-      reply = { skill = skill.name, target = action.targetId }
-
-    elseif action.type == "Pass" then
-      reply = {}
-
-    else
-      -- TODO(项目 7)：换精灵、道具、逃跑。要现在 gameflow.lua 的
-      -- Round:buildTurnOrder / Turn 里留出位置，才能在这里翻译成答复。
-      return false, "invalid_params", ("还不支持的操作类型 %q"):format(tostring(action.type))
-    end
-
-  elseif request.kind == "AskForChoice" then
-    reply = action.choice
-
-  else
-    return false, "server_error", ("还不认识这种询问 %q"):format(tostring(request.kind))
-  end
-
-  local kind = logic:resume(reply)
-  return true, Session.next_task(session, kind)
+  return false, "not_implemented",
+    "GameLogic 还没接 Request 层：没有挂起点可以恢复玩家操作（见 server/gamelogic.lua 的 TODO）"
 end
 
 --- 玩家进出房（架构文档 §5.5）。目前只是占位：真正的进房/掉线在房间层。
@@ -132,12 +110,16 @@ function Dispatchers.surrender(params)
   if session == nil then return false, "invalid_params", err end
 
   local logic = session.logic
-  local loser = params.playerId
-  local winner
-  for _, pet in ipairs(session.pets) do
-    if pet.side ~= nil and pet.side ~= loser then winner = pet.side end
+  -- playerId -> 阵营：会话里存的是 **0 基**阵营（`side - 1`，见 Session.create），
+  -- 而 GameLogic 的 sides 是 **1 基**（sides[1] / sides[2]），所以 +1。
+  local p = session.players[params.playerId]
+  if p == nil then
+    return false, "invalid_params", ("不认识的 playerId %s"):format(tostring(params.playerId))
   end
-  logic:gameOver(winner, "surrender")
+  local loser_side = p.side + 1
+  local winner = (loser_side == 1) and 2 or 1
+  -- 原来是 `logic:gameOver(...)`（BattleLogic 的入口）；新的 GameLogic 叫 finishGame
+  logic:finishGame(winner, "surrender")
   return true, Session.next_task(session, "finished")
 end
 
