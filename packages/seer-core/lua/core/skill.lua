@@ -3,7 +3,20 @@
 -- ============================ 技能 ============================
 --
 -- 对应 freekill-core 的 `ltk/core/skill.lua`。一个技能 = 基础数值（威力 / PP / 命中 /
--- 先制 / 暴击率 / 连击数）+ 一串效果（effects）+ 少量时机钩子（triggers）。
+-- 先制 / 暴击率 / 连击数）+ 一串效果（effects）。
+--
+-- ---------------------------- effects 里装的是什么（重要）----------------------------
+--
+-- `effects` 是 **Effect 实例数组**：每一项都是一个由 `Seer:createEffect` 造出来的对象
+-- （见 core/effect/effect.lua：id / name / timing / can_trigger / on_cost / on_use），
+-- **不是** `{ kind = "...", ... }` 这种数据表。
+--
+-- 原来那套 `{ kind = ... }` 的"效果类型（kind）注册表"（原 core/effect/kinds.lua）已经
+-- 随重构删除，Skill 也**不解析、不校验**这串东西——它只是原样存着。什么时候轮到谁触发，
+-- 是战斗逻辑的事（`GameLogic:buildEffectHandler` 收集 → `EffectHandler` 排序筛选执行）。
+--
+-- **`triggers` 字段已删**：技能不再自带"时机钩子表"。要挂时机就挂 Effect
+-- （`timing` + `on_use`），别再加第二套机制。
 --
 -- 这个类只有两件事：**初始化**（把 spec 的字段读进实例字段）和**读字段的 getter**。
 -- 别的一概不做——技能对象是图鉴里**全局共享**的那一份，任何"随场上情况变化"的判断
@@ -25,8 +38,8 @@
 --   hits      连击次数：整数，或按场上情况算的函数，可空
 --   usable    能不能用：false = 禁用；函数 = 按场上情况判断，可空。不写 = 能用
 --             （仍受 PP / 封印限制；真正的判定由战斗逻辑负责，不在这里）
---   effects   效果列表，默认 {}，每项是一张效果 spec（`{ kind = "...", ... }`）
---   triggers  时机钩子表，可空（特性这类常驻的东西才用）
+--   effects   效果列表，默认 {}，每项是一个 **Effect 实例**（`Seer:createEffect` 造出来的
+--             对象），不是 `{ kind = "...", ... }` 这种数据（kind 系统已删）
 --   tags      标签数组，默认 {}
 --   desc      描述，可空（正式描述走翻译表，这里只是给规则作者备注）
 --   extra     给规则作者自用的任意数据，默认 {}
@@ -48,7 +61,7 @@
 ---@field public crit_rate integer @ 暴击率加成（1 表示 +1 级暴击率）
 ---@field public hits integer|fun(self: Skill, source: Pet, target: Pet, logic: BattleLogic): integer @ 连击次数；整数或函数，可空
 ---@field public usable boolean|fun(skill: Skill, pet: Pet, context: table): boolean @ 能不能用；可空（nil = 能用，仍受 PP / 封印限制）
----@field public effects Effect[] @ 效果列表，每项是一张效果
+---@field public effects Effect[] @ 效果列表：每项是一个 **Effect 实例**（由 Seer:createEffect 造出来），不是 {kind=...} 数据
 ---@field public tags string[] @ 标签
 ---@field public desc string? @ 描述（给规则作者备注用）
 ---@field public extra table<string, any> @ 规则作者自用的任意数据
@@ -83,7 +96,7 @@ Skill.Status = "status"
 ---@field public crit_rate? integer @ 暴击率加成（1 表示 +1 级暴击率），默认 0
 ---@field public hits? integer|fun(self: Skill, source: Pet, target: Pet, logic: BattleLogic): integer @ 连击次数；整数，或写成函数按场上情况算
 ---@field public usable? boolean|fun(skill: Skill, pet: Pet, context: table): boolean @ 能不能用：`false` = 被禁止使用；函数 = 按场上情况判断；不写 = 能用（仍受 PP / 封印限制）
----@field public effects? EffectSpec[] @ 效果列表
+---@field public effects? Effect[] @ 效果列表：每项是一个 **Effect 实例**（由 Seer:createEffect 造出来），不是 {kind=...} 数据
 ---@field public tags? string[] @ 标签：用数值表达不了的性质才做成标签（"先制 +1" 用 priority，不做标签）
 ---@field public desc? string @ 描述（正式描述走翻译表，这里只是给规则作者备注）
 ---@field public extra? table<string, any> @ 塞给规则作者自用的任意数据
@@ -116,8 +129,9 @@ function Skill:initialize(spec)
   self.hits = spec.hits
   self.usable = spec.usable
 
+  -- effects：**Effect 实例数组**（不是 `{kind=...}` 数据）。这里只原样存着，
+  -- 不解析、不校验——收集与触发是战斗逻辑的事（GameLogic:buildEffectHandler → EffectHandler）。
   self.effects = spec.effects or {}
-  self.triggers = spec.triggers
   self.tags = spec.tags or {}
   self.desc = spec.desc
   self.extra = spec.extra or {}
@@ -192,7 +206,9 @@ function Skill:getTarget()
   return self.target
 end
 
----@return EffectSpec[]
+--- 技能挂着的效果。**每一项都是 Effect 实例**（技能/图鉴里那一份，全场共享），
+--- 不是 `{kind=...}` 数据——要读它的 id / name / timing 用 Effect 自己的 getter。
+---@return Effect[]
 function Skill:getEffects()
   return self.effects
 end
