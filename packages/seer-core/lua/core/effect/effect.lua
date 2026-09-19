@@ -2,12 +2,13 @@
 --
 -- ============================ 效果（Effect）============================
 --
--- 一个效果由七样东西构成：
+-- 一个效果由八样东西构成：
 --
 --   id           唯一标识
 --   name         名字（日志 / UI 用）
 --   reason       触发原因：为什么触发的
 --   timing       触发时机：挂在哪个时机上
+--   priority     优先级：越大越先触发，默认 0
 --   can_trigger  触发条件：fun(effect, ctx): boolean
 --   on_cost      代价：fun(effect, ctx)
 --   on_use       执行效果：fun(effect, ctx)

@@ -59,8 +59,8 @@ end
 --- 执行候选池里"挂在 `timing` 上、且 `canTrigger` 通过"的效果。
 --
 -- 排序：按优先级**从高到低**（高优先级先触发）。这与引擎里 skill_table / 印记触发器
--- 的"优先级降序"保持一致；`priority` 目前还不是 Effect 的正式字段（读到 nil 按 0），
--- 等 Effect 加上 priority 字段后这里自动生效。
+-- 的"优先级降序"保持一致；`priority` 是 Effect 的正式字段（默认 0），
+-- 这里用 `getPriority()` 取。
 --
 -- 时机匹配：`effect:getTiming() == timing`，两边得是**同一个对象**（同是时机类、或
 -- 同是字符串）；一个效果没写 timing（nil）就永远不匹配。
