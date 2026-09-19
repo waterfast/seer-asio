@@ -14,6 +14,12 @@
 --
 -- 结算顺序：先 `can_trigger` 问够不够格，再 `on_cost` 付代价，最后 `on_use` 真结算。
 
+---@class Effect: Object
+---@field public id string|integer @ 唯一标识
+---@field public name string @ 名字（没写就是 id 的字符串形式）
+---@field public reason string? @ 触发原因
+---@field public timing TriggerEvent? @ 触发时机
+---@field public priority integer @ 优先级，越大越先触发，默认 0
 Effect = class("Effect")
 
 ---@class EffectSpec
@@ -21,6 +27,7 @@ Effect = class("Effect")
 ---@field public name? string @ 名字
 ---@field public reason? string @ 触发原因
 ---@field public timing? TriggerEvent @ 触发时机
+---@field public priority? integer @ 优先级，越大越先触发，默认 0
 ---@field public can_trigger? function @ 触发条件 fun(effect, ctx): boolean
 ---@field public on_cost? function @ 代价 fun(effect, ctx)
 ---@field public on_use? function @ 执行效果 fun(effect, ctx)
@@ -34,6 +41,7 @@ function Effect:initialize(spec)
   self.name = spec.name or tostring(spec.id)
   self.reason = spec.reason
   self.timing = spec.timing
+  self.priority = spec.priority or 0
   self.can_trigger = spec.can_trigger
   self.on_cost = spec.on_cost
   self.on_use = spec.on_use
@@ -52,6 +60,9 @@ function Effect:getReason() return self.reason end
 
 ---@return string? @ 触发时机
 function Effect:getTiming() return self.timing end
+
+---@return integer @ 优先级，越大越先触发（没写就是 0）
+function Effect:getPriority() return self.priority end
 
 -- ---------------------------- 基本写入 ----------------------------
 
