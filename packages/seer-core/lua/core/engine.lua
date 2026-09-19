@@ -15,13 +15,28 @@
 --
 -- ---------------------------- 为什么要有这么个全局表 ----------------------------
 --
---   1. **跨引用**：技能要按名字查效果、精灵要按名字查技能和特性。
---      pet.lua 里直接写的就是 `Seer.species[name]` / `Seer.skills[species.ability]`，
---      所以这几张表的名字和形状是**契约**，不能随手改；
---   2. **重复检测**：两个包定义了同名技能/种族时，这里立刻告警。不报的话，
---      线上表现是"某个包的技能莫名其妙被另一个包覆盖了"，极难查
+--   1. **跨引用**：技能要按 id 查效果、精灵要按 id 查技能和种族。C++ 侧传来的就是
+--      数字 id（`USE_SKILL 1001` 比传中文名省事也更稳），图鉴编号也是 id；
+--      所以这里按 id 存，别人问什么都答得上；
+--   2. **重复检测**：两个包占了同一个 id（或同一个名字）时立刻告警。不报的话，
+--      线上表现是"某个包的技能莫名其妙被另一个包顶掉了"，极难查
 --      （freekill 在 `Engine:addSkill` 里也专门做了这个告警）；
 --   3. **数据与代码分家**：扩展包只往这里塞 spec，不碰核心类。
+--
+-- ---------------------------- id 是唯一键，名字只是索引 ----------------------------
+--
+-- 官方赛尔号用的就是编号：精灵有图鉴编号、技能有技能编号。**同名是合法的**
+-- （不同精灵可以有同名技能、同一只精灵的多个形态也是不同条目），所以：
+--
+--   * **主表按 id 存**：`species_by_id` / `skills_by_id` / `effects_by_id` / `pets_by_id`。
+--     要精确拿到某一个对象，**一律用 id**：`getSkillById(1001)`；
+--   * **名字索引只是便利**：`species["布布种子"]`、`skills["撞击"]` 这种写法好写、
+--     日志好看，而且 `pet.lua` 就是按名字解析种族和技能的，所以留着。
+--     但名字不唯一时它只能装一个（**最后注册的那个**，并且告警）——
+--     也就是说"名字索引里是谁"取决于加载顺序，**不能拿它当唯一标识**。
+--
+-- 一句话：**id 决定"是谁"，名字只决定"写起来顺不顺"**。想按名字显示中文，
+-- 用下面的 `getSkillName(id)` / `getSkillDesc(id)` 一类方法，别把名字当键。
 --
 -- 边界（架构文档 §7）：这里装的是**本进程内**的目录。玩家**拥有**的精灵存在
 -- C++ 的 SQLite 里，Lua 侧只有"一局之内"的对象——所以 `species` 是全服共享的
@@ -31,34 +46,44 @@
 --
 -- 这是最容易搞混的地方，所以表和工厂方法都分开：
 --
---   Seer:addSpecies{ name = "布布种子", ... }  -- 图鉴：这是个什么样的精灵（静态、只读）
---   Seer:createPet{ species = "布布种子" }     -- 这一局里的那一只（动态、会掉血）
+--   Seer:addSpecies{ id = 1, name = "布布种子", ... }  -- 图鉴：这是个什么样的精灵（静态、只读）
+--   Seer:createPet{ id = 7, species = "布布种子" }     -- 这一局里的那一只（动态、会掉血）
 --
 -- `skills` 一层就够：技能对象本身只有数据、没有随场上变化的字段（见 skill.lua），
 -- 图鉴里那一份就是全场共享的那一份，不需要再分"类型"和"实例"。
 --
 -- `effects` 也是**一层**：一张 spec 造一个 Effect，由 `createEffect` 造好后顺手
--- 导进引擎（`self.effects`），没有"效果类型（kind）"那层间接——见下面"效果"一节。
+-- 导进引擎（`self.effects` / `self.effects_by_id`），没有"效果类型（kind）"那层间接
+-- ——见下面"效果"一节。
 --
 -- ---------------------------- spec 方式 ----------------------------
 --
--- 规则作者只写表，注册一律走这里：
+-- 规则作者只写表，注册一律走这里（id 尽量都写：它是唯一标识，也是协议里传的那个数）：
 --
 -- ```lua
 -- Seer:addSpecies{ id = 1, name = "布布种子", elements = { "草" } }
--- Seer:createSkill{ name = "撞击", category = Skill.Physical, power = 35 }
+-- Seer:createSkill{ id = 1001, name = "撞击", category = Skill.Physical, power = 35 }
 -- Seer:createEffect{ id = "burn_dot", name = "灼烧掉血", timing = ..., on_use = ... }
--- Seer:createPet{ species = "布布种子", level = 50, skills = { "撞击" } }
+-- Seer:createPet{ id = 7, species = "布布种子", level = 50, skills = { "撞击" } }
+--
+-- Seer:getSkillById(1001)   --> Skill 对象
+-- Seer:getSkillName(1001)   --> "撞击"（客户端手里只有 id，显示用的名字问这里要）
 -- ```
+--
+-- 注意：`PetSpec.species` / `PetSpec.skills` 目前由 pet.lua 按**名字**解析
+-- （`seer.species[name]` / `seer.skills[name]`），所以那里写名字或直接传对象。
+-- 想在 spec 里写编号，得同时改 pet.lua 那两处解析。
 
 ---@class Seer: Object
 ---@field public root string @ seer-core 包根目录（用来拼包内相对路径）
----@field public species table<string, PetSpecies> @ 种族：种族名 --> 种族（静态图鉴）
----@field public species_by_id table<integer, PetSpecies> @ 种族：图鉴编号 --> 种族
----@field public pets table<string, Pet> @ 运行时精灵实例：pet.name --> Pet
----@field public skills table<string, Skill> @ 技能：技能名 --> 技能
----@field public skills_by_id table<integer, Skill> @ 技能：数字 id --> 技能（和 C++ 的 USE_SKILL 对齐）
----@field public effects table<string, Effect> @ 效果：效果名 --> Effect（由 createEffect 导入）
+---@field public species table<string, PetSpecies> @ 种族**名字索引**（重名留最后一个并告警；唯一键是 id）
+---@field public species_by_id table<integer, PetSpecies> @ 种族**主表**：图鉴编号 --> 种族
+---@field public pets table<string, Pet> @ 精灵**名字索引**：pet.name --> Pet（重名留最后一个并告警）
+---@field public pets_by_id table<string|integer, Pet> @ 精灵**主表**：PetSpec.id --> Pet
+---@field public skills table<string, Skill> @ 技能**名字索引**（重名留最后一个并告警；唯一键是 id）
+---@field public skills_by_id table<integer, Skill> @ 技能**主表**：技能编号 --> 技能（和 C++ 的 USE_SKILL 对齐）
+---@field public effects table<string, Effect> @ 效果**名字索引**：效果名 --> Effect
+---@field public effects_by_id table<string|integer, Effect> @ 效果**主表**：Effect.id --> Effect（唯一键）
 ---@field public elements table? @ `core.elements` 模块（属性克制表）；加载失败时为 nil
 ---@field public packages table<string, table> @ 已加载的扩展包 spec：包名 --> 包
 ---@field public package_names string[] @ 包名数组（保序，日志与加载顺序用）
@@ -70,17 +95,19 @@ function Seer:initialize()
   -- 包根目录。真正的值由 seer.lua 用 `Seer.root = ROOT` 填进来（注释见 resolvePath）
   self.root = "."
 
-  -- 精灵：种族（静态）+ 实例（运行时）
+  -- 精灵：种族（静态）+ 实例（运行时）。id 是主表，名字是索引（见文件头）
   self.species = {}
   self.species_by_id = {}
   self.pets = {}
+  self.pets_by_id = {}
 
   -- 技能
   self.skills = {}
   self.skills_by_id = {}
 
-  -- 效果：createEffect 造出来的都导进这张表（和 pets / skills 一样留一份目录）
+  -- 效果：createEffect 造出来的都导进这两张表
   self.effects = {}
+  self.effects_by_id = {}
 
   -- 扩展包
   self.packages = {}
@@ -117,9 +144,11 @@ end
 -- ============================ 1. 精灵：种族 ============================
 --
 -- 种族是**静态图鉴数据**：全服共享一份、只读、可以随 Lua 包分发。
--- 两张索引同时维护，因为两种查法都常用：
---   * 按名字查（技能、特性、存档里写的都是名字）—— `self.species`
---   * 按图鉴编号查（协议里传数字更稳）—— `self.species_by_id`
+-- 两张表同时维护，但地位不同：
+--   * `self.species_by_id` —— **主表**，键是图鉴编号，一个编号就是一隻精灵；
+--   * `self.species`      —— **名字索引**，方便规则作者写 `species = "布布种子"`
+--     （pet.lua 也是按名字解析的）。重名时留最后注册的那个并告警：
+--     名字不是唯一标识，要精确取请用编号。
 
 --- 登记一个种族。
 ---@param spec PetSpeciesSpec
@@ -127,24 +156,38 @@ end
 function Seer:addSpecies(spec)
   local sp = PetSpecies:new(spec)
 
-  if self.species[sp.name] ~= nil then
-    self:qWarning(("种族 %s 被重复定义，后者覆盖前者（检查是不是两个包都定义了它）"):format(sp.name))
-  end
-  self.species[sp.name] = sp
-
-  if sp.id ~= nil then
+  -- id 是唯一键，必须尽量写：没有它就只能靠名字找，而名字可能重复
+  if sp.id == nil then
+    self:qWarning(("种族 %s 没有写图鉴编号（id），只能按名字查——建议补上 id"):format(sp.name))
+  else
     local old = self.species_by_id[sp.id]
     if old ~= nil and old ~= sp then
-      self:qWarning(("图鉴编号 %s 被 %s 和 %s 同时占用"):format(
+      self:qWarning(("图鉴编号 %s 被 %s 和 %s 同时占用（id 必须唯一，后者覆盖前者）"):format(
         tostring(sp.id), old.name, sp.name))
     end
     self.species_by_id[sp.id] = sp
   end
 
+  -- 名字索引：重名是**合法**的（不同编号的同名精灵），所以这里只留最后一个并告警，
+  -- 两个种族本身都好好地在主表里，谁也顶不掉谁
+  if self.species[sp.name] ~= nil then
+    self:qWarning(("种族名 %s 重复（编号 %s 与 %s），按名字查只能拿到最后一个，请用 id 取"):format(
+      sp.name, tostring(self.species[sp.name].id), tostring(sp.id)))
+  end
+  self.species[sp.name] = sp
+
   return sp
 end
 
---- 按名字或图鉴编号取种族。
+--- 按**图鉴编号**取种族（唯一键，最准的查法）。
+---@param id integer
+---@return PetSpecies?
+function Seer:getSpeciesById(id)
+  return self.species_by_id[id]
+end
+
+--- 按名字或图鉴编号取种族（图省事的写法；数字按 id 查，字符串按名字查）。
+--- 名字重名时拿到的是最后注册的那个——要确定是哪一个请用 `getSpeciesById`。
 ---@param key string|integer
 ---@return PetSpecies?
 function Seer:getSpecies(key)
@@ -154,32 +197,52 @@ end
 
 -- ============================ 2. 精灵：实例 ============================
 --
--- 和种族相反：Pet 是**运行时**对象（这只精灵几级、多少血、挂着什么状态），
--- 寿命跟着一局战斗走。C++ 把存档里的输入（种族名 / 等级 / 个体值 / 学习力 /
--- 性格 / 技能名）传给 Lua，这里用 `createPet` 现场把它变成能参战的对象。
+-- 和种族相反：Pet 是**运行时**对象（这只精灵几级、属性值多少、带着哪几个技能），
+-- 寿命跟着一局战斗走。C++ 把存档里的输入（种族 / 等级 / 个体值 / 学习力 /
+-- 性格 / 技能）传给 Lua，这里用 `createPet` 现场把它变成能参战的对象。
+--
+-- 唯一键同样是 **id**（`PetSpec.id`，C++ 那边给的实例编号）：一局里两只
+-- "布布种子"完全正常（双方的镜像队），靠名字根本分不开。
 
---- 造一只精灵，并登记进 `self.pets`。
+--- 造一只精灵，并登记进引擎。
 ---
---- 键用 `pet.name`（昵称优先，没昵称就是种族名）——"按名字找精灵"是战斗里
---- 最常见的查法（触发者、被攻击者、协议里都传名字）。
+--- 登记两张表：
+---   * `self.pets_by_id[pet.id]` —— 主表（有 id 才登记），战斗里认精灵靠它；
+---   * `self.pets[pet.name]`    —— 名字索引，图省事的写法与日志用。
 ---
---- **注意**：同名会互相覆盖（镜像对战里两边可能都带"布布种子"），所以这里
---- 重名要告警。要严格区分同名的两只，得靠 `pet.side` / `pet.seat`，
---- 或者调用方自己另外记一份按座位的表——注册表这一层的键就是名字。
+--- **注意**：名字索引同名会互相覆盖（镜像对战两边都带"布布种子"很常见），
+--- 所以重名要告警、且它留的是最后创建的那只。要精确找某一只请用 `getPetById`。
 ---@param spec PetSpec
 ---@return Pet
 function Seer:createPet(spec)
   local pet = Pet:new(spec)
 
+  if pet.id ~= nil then
+    local old = self.pets_by_id[pet.id]
+    if old ~= nil and old ~= pet then
+      self:qWarning(("精灵 id %s 被 %s 和 %s 同时占用（同 id 重造会覆盖）"):format(
+        tostring(pet.id), old.name, pet.name))
+    end
+    self.pets_by_id[pet.id] = pet
+  end
+
   if self.pets[pet.name] ~= nil then
-    self:qWarning(("精灵 %s 已被创建过，注册表里的旧实例被新实例覆盖"):format(pet.name))
+    self:qWarning(("精灵名 %s 已有实例，名字索引被新实例覆盖（要分清同名的两只请用 id）"):format(
+      pet.name))
   end
   self.pets[pet.name] = pet
 
   return pet
 end
 
---- 按名字取运行时精灵实例（没创建过就是 nil）。
+--- 按 **id** 取运行时精灵实例（最准的查法；没创建过或没写 id 就是 nil）。
+---@param id string|integer
+---@return Pet?
+function Seer:getPetById(id)
+  return self.pets_by_id[id]
+end
+
+--- 按名字取运行时精灵实例（图省事；同名时拿到最后创建的那只）。
 ---@param name string
 ---@return Pet?
 function Seer:getPet(name)
@@ -189,10 +252,10 @@ end
 -- ============================ 3. 技能 ============================
 --
 -- 技能对象只有数据（威力 / PP / 类别 / 效果列表），图鉴里那一份就是全场共享的
--- 那一份，所以不需要"类型 / 实例"两层，一张 `self.skills` 就够。
---
--- 数字 id 索引**随手维护**：`addSkill` 遇到 `skill.id` 就填进 `skills_by_id`，
--- 不搞"加载完再懒建一次"那套（懒建会让"什么时候索引才有效"变成隐形约定）。
+-- 那一份，所以不需要"类型 / 实例"两层。同样两张表、一种地位：
+--   * `self.skills_by_id` —— **主表**，键是技能编号（C++ 的 `USE_SKILL 1001` 就是它）；
+--   * `self.skills`       —— **名字索引**，方便按名字取（pet.lua 按名字解析技能）。
+-- **同名技能是合法的**（不同精灵可以有同名技能），所以唯一标识只能是 id。
 
 --- 把一个技能对象登记进来。
 ---@param skill Skill
@@ -200,21 +263,25 @@ end
 function Seer:addSkill(skill)
   assert(skill ~= nil and skill:isInstanceOf(Skill), "Seer:addSkill 只接受 Skill 及其子类")
 
-  local old = self.skills[skill.name]
-  if old ~= nil and old ~= skill then
-    self:qWarning(("技能 %s 被重复定义，后者覆盖前者"):format(skill.name))
-  end
-  self.skills[skill.name] = skill
-
-  -- 有数字 id 就顺手建 id 索引（同一只 id 被两个技能占用要报出来）
-  if skill.id ~= nil then
+  -- id 是唯一键。没有 id 的技能只能按名字查，而同名是允许的 → 一定要提醒
+  if skill.id == nil then
+    self:qWarning(("技能 %s 没有写 id，只能按名字查——建议补上（协议里也用它）"):format(skill.name))
+  else
     local old_id = self.skills_by_id[skill.id]
     if old_id ~= nil and old_id ~= skill then
-      self:qWarning(("技能 id %s 被 %s 和 %s 同时占用"):format(
+      self:qWarning(("技能 id %s 被 %s 和 %s 同时占用（id 必须唯一，后者覆盖前者）"):format(
         tostring(skill.id), old_id.name, skill.name))
     end
     self.skills_by_id[skill.id] = skill
   end
+
+  -- 名字索引：重名合法，留最后一个并告警（两个技能都在主表里，按 id 都取得到）
+  local old = self.skills[skill.name]
+  if old ~= nil and old ~= skill then
+    self:qWarning(("技能名 %s 重复（id %s 与 %s），按名字查只能拿到最后一个，请用 id 取"):format(
+      skill.name, tostring(old.id), tostring(skill.id)))
+  end
+  self.skills[skill.name] = skill
 
   return skill
 end
@@ -269,17 +336,21 @@ end
 -- 而赛尔号的效果是**一张 spec 造一个实例**，再套一层类型注册只会让
 -- "这个效果写在哪"变成两个地方，还多一步查表。
 
---- 造一个效果，并导入引擎的 `self.effects`。
+--- 造一个效果，并导入引擎。
 ---
 --- 走这里而不是到处 `Effect:new`：所有效果都从同一个门进来，引擎才知道自己有哪些效果
 --- （统一日志、校验、计数将来都只改这一个地方）。包 spec 里的 `effects` 也走这条路
 --- （见 addPackage），**没有第二条注册路径**。
 ---
---- 键用 `effect.name`（spec 没写 name 时 `Effect` 用 id 兜底），和 pets / skills 一致。
---- 同名会覆盖（引擎里留的是最新那个）：效果同名很正常——同一个效果可以同时挂在
---- 好几只精灵身上、也会每个回合重造。所以要把这个对象发给谁，请用**返回值**，
---- `self.effects` 只是"引擎造过什么"的目录，不是谁身上的背包
---- （身上挂着什么看 `pet.effects`）。
+--- 导入两张表：
+---   * `self.effects_by_id[effect.id]` —— 主表。`Effect` 本来就要求 id（唯一标识），
+---     所以效果**一定**能按 id 取到；
+---   * `self.effects[effect.name]`    —— 名字索引，图省事用（`Effect` 没写 name 时用 id 兜底）。
+---
+--- 两张表都是**留最新**的、不告警：效果是运行时对象，同一个效果每回合、每只精灵身上
+--- 重造是**正常**的（不像种族/技能那样是定义冲突，那种才要报）。
+--- 所以要把某个实例发给谁，请用**返回值**；这两张表只是"引擎造过什么"的目录，
+--- 谁身上挂着什么看 `pet.effects`。
 ---@param spec EffectSpec
 ---@param source? Pet @ 效果来源（谁给的）
 ---@param target_pet? Pet @ 效果挂在哪只精灵身上
@@ -288,18 +359,87 @@ function Seer:createEffect(spec, source, target_pet)
   assert(type(spec) == "table", "Seer:createEffect 需要一张 effect spec")
 
   local effect = Effect:new(spec, source, target_pet)
+
+  self.effects_by_id[effect.id] = effect
   self.effects[effect.name] = effect
   return effect
 end
 
---- 按名字取引擎里创建过的效果（没创建过就是 nil）
+--- 按 **id** 取效果（唯一键；没造过就是 nil）。
+---@param id string|integer
+---@return Effect?
+function Seer:getEffectById(id)
+  return self.effects_by_id[id]
+end
+
+--- 按名字取效果（图省事；同名时拿到最后造的那个）。
 ---@param name string
 ---@return Effect?
 function Seer:getEffect(name)
   return self.effects[name]
 end
 
--- ============================ 5. 属性 ============================
+-- ============================ 5. 图鉴文本（按 id 取名字和描述） ============================
+--
+-- C++ / 客户端手里通常只有 id（协议里传的就是编号，图鉴里查的也是编号），
+-- 要显示中文名和技能描述时问这里。名字是**显示数据**，id 才是标识：哪天要统一换成
+-- 翻译表、或者把名字改成英文键，改动都只在这几个方法里，调用方不用动。
+--
+-- 这 6 个方法都**nil 安全**：id 不认识、或者那一项自己没写描述，就返回 nil
+-- （不报错、也不编一个名字出来）——显示层拿到 nil 可以自己退化成"未知技能 1001"。
+--
+-- 注：`desc` 目前只有技能有（skill.lua 的 `SkillSpec.desc`）；种族和效果的类还没有
+-- 这个字段，所以那两个 `getXxxDesc` 现在固定返回 nil，等类上加了就自动生效。
+
+--- 技能编号 --> 技能名
+---@param id integer
+---@return string? name
+function Seer:getSkillName(id)
+  local skill = self.skills_by_id[id]
+  return skill ~= nil and skill.name or nil
+end
+
+--- 技能编号 --> 技能描述（规则作者的备注；正式文案将来走翻译表）
+---@param id integer
+---@return string? desc
+function Seer:getSkillDesc(id)
+  local skill = self.skills_by_id[id]
+  return skill ~= nil and skill.desc or nil
+end
+
+--- 图鉴编号 --> 种族名
+---@param id integer
+---@return string? name
+function Seer:getSpeciesName(id)
+  local sp = self.species_by_id[id]
+  return sp ~= nil and sp.name or nil
+end
+
+--- 图鉴编号 --> 种族描述（`PetSpecies` 现在还没有 desc 字段，暂时恒为 nil）
+---@param id integer
+---@return string? desc
+function Seer:getSpeciesDesc(id)
+  local sp = self.species_by_id[id]
+  return sp ~= nil and sp.desc or nil
+end
+
+--- 效果 id --> 效果名
+---@param id string|integer
+---@return string? name
+function Seer:getEffectName(id)
+  local effect = self.effects_by_id[id]
+  return effect ~= nil and effect.name or nil
+end
+
+--- 效果 id --> 效果描述（`Effect` 现在还没有 desc 字段，暂时恒为 nil）
+---@param id string|integer
+---@return string? desc
+function Seer:getEffectDesc(id)
+  local effect = self.effects_by_id[id]
+  return effect ~= nil and effect.desc or nil
+end
+
+-- ============================ 6. 属性 ============================
 --
 -- 属性克制表是一张**纯数据表**（谁打谁是 2 倍 / 0.5 倍 / 免疫），
 -- 放在独立模块 `core.elements` 里，和核心代码解耦：
@@ -350,15 +490,15 @@ function Seer:getElementMultiplier(attack, defend)
   return elements.getMultiplier(attack, defend)
 end
 
--- ============================ 6. 时机 ============================
+-- ============================ 7. 时机 ============================
 --
 -- 时机等待重构
 
--- ============================ 7. 印记 ============================
+-- ============================ 8. 印记 ============================
 --扽得改重构
 
 
--- ============================ 8. 战局与随机数 ============================
+-- ============================ 9. 战局与随机数 ============================
 
 ---@param logic BattleLogic
 ---@return BattleLogic
@@ -379,7 +519,7 @@ function Seer:newRng(seed)
   return Rng:new(seed)
 end
 
--- ============================ 9. 扩展包 ============================
+-- ============================ 10. 扩展包 ============================
 
 --- 加载一个扩展包 spec。
 --- spec 的形状：
