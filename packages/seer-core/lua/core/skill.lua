@@ -1,4 +1,5 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
+local GameObject = require "core.gameobject"
 --
 -- ============================ 技能 ============================
 --
@@ -12,13 +13,14 @@
 -- **不是** `{ kind = "...", ... }` 这种数据表。
 --
 -- 原来那套 `{ kind = ... }` 的"效果类型（kind）注册表"（原 core/effect/kinds.lua）已经
--- 随重构删除，Skill 也**不解析、不校验**这串东西——它只是原样存着。什么时候轮到谁触发，
+-- 随重构删除。GameObject 检查效果对象并保存独立的挂载数组，
+-- Skill 不解析效果规则。什么时候轮到谁触发，
 -- 是战斗逻辑的事（`GameLogic:buildEffectHandler` 收集 → `EffectHandler` 排序筛选执行）。
 --
 -- **`triggers` 字段已删**：技能不再自带"时机钩子表"。要挂时机就挂 Effect
 -- （`timing` + `on_use`），别再加第二套机制。
 --
--- 这个类只有两件事：**初始化**（把 spec 的字段读进实例字段）和**读字段的 getter**。
+-- 本类初始化技能数值并提供 getter，效果挂载 API 继承自 GameObject。
 -- 别的一概不做——技能对象是图鉴里**全局共享**的那一份，任何"随场上情况变化"的判断
 -- （伤害、命中、能不能用、标签查询、技能栏、时机触发）都属于战斗逻辑，写在 core/ 下
 -- 的其他文件里。所以这里没有分支、没有查询、不碰精灵。
@@ -47,8 +49,8 @@
 --- 技能类别：Skill.Physical / Skill.Special / Skill.Status
 ---@alias SkillCategory string
 
---- 一个技能。**只有数据，没有行为**：读它的字段用下面的 getter；要改它得在造它之前改 spec。
----@class Skill: Object
+--- 一个技能定义。挂载接口只应在配置阶段使用，战斗中的状态请保存到拥有者。
+---@class Skill: GameObject
 ---@field public name string @ 技能名（全局唯一，也是查表 / 翻译的键）
 ---@field public id integer? @ 数字 id，和 C++ 的 `USE_SKILL <id>` 对齐
 ---@field public element string? @ 技能属性；nil 表示"随使用者本属性"
@@ -65,7 +67,7 @@
 ---@field public tags string[] @ 标签
 ---@field public desc string? @ 描述（给规则作者备注用）
 ---@field public extra table<string, any> @ 规则作者自用的任意数据
-Skill = class("Skill")
+Skill = GameObject:subclass("Skill")
 
 -- ---------------------------- 类别常量 ----------------------------
 --
@@ -83,7 +85,7 @@ Skill.Status = "status"
 -- ---------------------------- spec ----------------------------
 
 --- 规则作者写的就是这张表（"spec 方式"）。只有 `name` 是必需的，其余不写就用默认值。
----@class SkillSpec
+---@class SkillSpec: GameObjectSpec
 ---@field public name string @ 技能名，必须全局唯一（也是查表、翻译的键）
 ---@field public id? integer @ 数字 id，用于和 C++ 侧 `USE_SKILL <id>` 对齐
 ---@field public element? string @ 技能属性（如 "电"）；nil 表示"随使用者本属性"
@@ -105,6 +107,7 @@ Skill.Status = "status"
 ---@param spec SkillSpec
 function Skill:initialize(spec)
   spec = spec or {}
+  GameObject.initialize(self, spec)
 
   if type(spec.name) ~= "string" or spec.name == "" then
     error("Skill 需要一个非空的 name", 2)
@@ -129,9 +132,8 @@ function Skill:initialize(spec)
   self.hits = spec.hits
   self.usable = spec.usable
 
-  -- effects：**Effect 实例数组**（不是 `{kind=...}` 数据）。这里只原样存着，
-  -- 不解析、不校验——收集与触发是战斗逻辑的事（GameLogic:buildEffectHandler → EffectHandler）。
-  self.effects = spec.effects or {}
+  -- effects：**Effect 实例数组**（不是 `{kind=...}` 数据）。挂载表由 GameObject 初始化，
+  -- 这里只保存定义；收集与触发由 GameLogic:buildEffectHandler → EffectHandler 完成。
   self.tags = spec.tags or {}
   self.desc = spec.desc
   self.extra = spec.extra or {}

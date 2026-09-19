@@ -4,15 +4,9 @@
 --
 -- 一个 `roomId` 对应一个会话。里面装着：房间适配器、`GameLogic`、以及这一局的精灵。
 --
--- ---------------------------- 房间适配器是什么 ----------------------------
---
--- 重构前的 `BattleLogic` 要求房间提供三件事（`getAlivePets()` / `notifyPlayers()` /
--- `askToChoice()`），所以这里有个适配器。**现在只有两件事还有用**：
---   * 收事件：`logic.on_notify` 的回调把事件攒进 `room.events`，等 `Session.flush` 推出去；
---   * 问选择：`room:askToChoice`（走 Peer）——但新的 `GameLogic` 现在用内置的
---     `pickAction` 选行动、**还没接 Request 层**，所以这个口子暂时没人调（见下）。
--- `room:doRequest` / `logic:registerAllPets` / `logic.pending_request` 这些原 BattleLogic
--- 的入口已经随重构删除，不要在会话层再用。
+-- BattleRoom 保存局内对象、效果来源和事件队列；Session 只添加协议适配。
+-- 规则效果通过对象挂载，GameLogic:run 在 BattleStart 前登记双方来源。
+-- 交互式询问尚未接入 GameLogic，下面的 askToChoice 保留同步协议入口。
 --
 -- ---------------------------- 事件为什么要攒着批量发 ----------------------------
 --
@@ -35,7 +29,7 @@ Session = {}
 
 ---@class Session
 ---@field public room_id integer
----@field public room table @ 给 GameLogic / 会话层用的房间适配器
+---@field public room BattleRoom @ 局内状态容器
 ---@field public logic GameLogic
 ---@field public pets Pet[]
 ---@field public players table @ playerId --> { side = ..., pets = ... }
@@ -92,51 +86,21 @@ end
 function Session.create(room_id, params)
   local pets = {}
   local players = {}
+  local units = {}
 
   for side, player in ipairs(params.players or {}) do
     local player_pets = {}
     for _, pet_spec in ipairs(player.pets or {}) do
-      -- 阵营/座位**不在这里排**了：`GameLogic:new{ pets = ... }` 会按平铺数组
-      -- 对半分边，并在 `_defaultSides` 里挂上 `pet.side` / `pet.seat`
-      -- （Pet 自己已经没有这两个字段了，见 core/pet.lua）。
-      -- 所以这里只保证"同一位玩家的精灵挨在一起"，别的手交给逻辑层。
+      -- 玩家分组通过 Unit 传给逻辑层，房间另行维护全局协议座位。
       local pet = Pet:new(pet_spec)
       table.insert(pets, pet)
       table.insert(player_pets, pet)
     end
     players[player.playerId] = { side = side - 1, pets = player_pets }
+    units[side] = Unit:new{ id = player.playerId, name = player.name, pets = player_pets }
   end
 
-  local room = {
-    id = room_id,
-    pets = pets,
-    events = {},     -- 攒着待发的事件
-  }
-
-  -- ⚠ 座位号有个坑：`GameLogic:_defaultSides` 里 `seat` 是**每个阵营内部**的序号
-  -- （两边的首发都是 seat = 1），所以它**不是全场唯一标识**，不能直接当协议里的
-  -- "打哪一只"用。会话层自己另外维护一张"协议座位"表：按创建顺序全场编号
-  -- （1、2、3…），发给客户端 / 用在 reply.target 上的都是它。
-  room.seat_of = {}
-  for i, pet in ipairs(pets) do
-    room.seat_of[pet] = i
-  end
-
-  --- 协议座位（全场唯一）
-  function room:seatOf(pet)
-    return pet and (self.seat_of[pet] or pet.seat) or nil
-  end
-
-  --- 场上还站着的精灵（转发到 GameLogic：它才是"谁倒下了"的裁判）
-  function room:getAlivePets()
-    if self.logic == nil then return self.pets end
-    return self.logic:getActors()
-  end
-
-  --- 有事发生 → 先攒着（真正发出去在 Session.flush）
-  function room:notifyPlayers(evt)
-    table.insert(self.events, evt)
-  end
+  local room = BattleRoom:new{ id = room_id, units = units, pets = pets }
 
   --- 非"真挂起"模式下问玩家选择：这里只能同步问对面一次。
   --- TODO(交互式询问未接)：新的 GameLogic 还没接 Request 层，现在没人会调它；
@@ -153,7 +117,7 @@ function Session.create(room_id, params)
   -- 种子必须由对面给：战斗内不能自己取时间当种子，否则同一局重放不一致。
   room.logic = nil
   local logic = GameLogic:new({
-    pets = pets,
+    units = units,
     room = room,
     rng_seed = params.seed or ("room-" .. room_id .. "-game-1"),
   })

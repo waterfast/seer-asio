@@ -13,6 +13,9 @@
 --   on_cost      代价：fun(effect, ctx)
 --   on_use       执行效果：fun(effect, ctx)
 --
+-- Effect 可以作为共享定义复用；不要把层数、剩余回合等局内状态写入共享定义。
+-- 使用 ctx.owner / ctx.room 保存所属对象或房间的局内状态。
+--
 -- 结算顺序：先 `can_trigger` 问够不够格，再 `on_cost` 付代价，最后 `on_use` 真结算。
 
 ---@class Effect: Object
@@ -59,7 +62,7 @@ function Effect:getName() return self.name end
 ---@return string? @ 触发原因
 function Effect:getReason() return self.reason end
 
----@return string? @ 触发时机
+---@return TriggerEvent? @ 时机类
 function Effect:getTiming() return self.timing end
 
 ---@return integer @ 优先级，越大越先触发（没写就是 0）
@@ -73,7 +76,7 @@ function Effect:setName(name) self.name = name end
 ---@param reason? string
 function Effect:setReason(reason) self.reason = reason end
 
----@param timing? string
+---@param timing? TriggerEvent
 function Effect:setTiming(timing) self.timing = timing end
 
 -- ---------------------------- 三个动作 ----------------------------
@@ -81,7 +84,7 @@ function Effect:setTiming(timing) self.timing = timing end
 -- 把 `can_trigger` / `on_cost` / `on_use` 包一层：没写就是"不拦、不付、不做事"。
 
 --- 触发条件：没写 can_trigger 就默认放行。
----@param ctx table
+---@param ctx EffectContext
 ---@return boolean
 function Effect:canTrigger(ctx)
   if not self.can_trigger then return true end
@@ -89,14 +92,14 @@ function Effect:canTrigger(ctx)
 end
 
 --- 代价：没写 on_cost 就表示这个效果不用付代价。
----@param ctx table
+---@param ctx EffectContext
 function Effect:cost(ctx)
   if not self.on_cost then return end
   return self.on_cost(self, ctx)
 end
 
 --- 执行效果：没写 on_use 就什么都不做。
----@param ctx table
+---@param ctx EffectContext
 function Effect:use(ctx)
   if not self.on_use then return end
   return self.on_use(self, ctx)

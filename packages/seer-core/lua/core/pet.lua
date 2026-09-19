@@ -146,7 +146,7 @@ end
 
 --- 造一只战斗精灵需要哪些输入 —— 这份清单就是 C++ SQLite 该存的列。
 --- 除了 `species`，全部可空（不写就用默认值），所以最小写法是 `Pet:new{ species = "布布种子" }`。
----@class PetSpec
+---@class PetSpec: GameObjectSpec
 ---@field public species string|PetSpecies @ 种族名（查 `Seer.species`）或种族对象
 ---@field public name? string @ 昵称；不填就用种族名
 ---@field public nickname? string @ `name` 的旧写法，等价（两者都写时以 `name` 为准）
@@ -159,7 +159,10 @@ end
 ---@field public skills? (string|Skill)[] @ 普通技能，最多 4 个（名字或 Skill 对象）
 ---@field public fifth? string|Skill @ 第五技能（**单独一个属性**，不占普通技能格），可空
 
-Pet = class("Pet")
+local GameObject = require "core.gameobject"
+
+---@class Pet: GameObject
+Pet = GameObject:subclass("Pet")
 
 --- 六项属性值的**字段名**，顺序固定（日志、协议、UI 都按这个顺序走）。
 --- 真正的数值在 Pet 的独立字段上（`pet.attack` 等），这张表只是"用来遍历的清单"。
@@ -343,6 +346,7 @@ end
 ---@param spec PetSpec
 function Pet:initialize(spec)
   spec = spec or {}
+  GameObject.initialize(self, spec)
 
   -- 种族：可以传对象（测试里就这么用），也可以传名字（走 Seer.species）
   local species = spec.species

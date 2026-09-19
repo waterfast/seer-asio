@@ -1,5 +1,7 @@
 # seer-core —— Lua 侧战斗核
 
+当前效果框架见 [效果挂载与时机分发](docs/effect-dispatch.md)：GameObject 挂载效果，BattleRoom 保存局内信息与来源对象，GameLogic.trigger 每次构造匹配时机的效果集。
+
 > ## ⚠️ 本文档描述的是**重构前**的状态，以代码为准
 >
 > 正在进行的重构已经改掉了下面这些名字 / 文件（本 README 尚未逐节重写，

@@ -1,47 +1,12 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
---
--- ============================ 战斗逻辑（GameLogic）============================
---
--- 参考 freekill-core 的 `lua/server/gamelogic.lua`（GameLogic）。它只干一件事：
--- 把一局战斗"怎么走完"串起来——`run()` 就是整局的主循环。
---
--- run() 分三段（对应 freekill 的 GameEvent.Game:main → Round → Turn 流程，
--- 但赛尔号没有手牌/阶段，直接一个循环就够了）：
---
---   1. 导入双方精灵：把 opts.pets 里的精灵分好边、装好战斗状态（体力等）；
---   2. 加载技能到时机表：把每只精灵技能上的时机钩子（`skill.triggers`）登记进 skill_table。
---      ⚠ 技能上的 `triggers` 字段已随重构从 Skill 上去掉（见 core/skill.lua），所以这一遍
---      现在**登记不到东西**（`pairs(nil or {})` 而已）——留在这里是因为时机表本身还有用
---      （以后按名字挂时机的印记/特性会往这里注册）；
---   3. 游戏循环：BattleStart → 每个大回合（TurnStart / TurnReady / DecidePriority
---      → 双方各出手一次 → TurnEnd / AfterTurnEnd）→ BattleEnd，分出胜负。
---
--- 时机（TriggerEvent）是同步的"这一刻谁想插一脚"，这里只负责**按顺序触发**它们；
--- 真正挂在时机上的触发器（技能特性）后续再装。
---
--- 效果（Effect）走的是**另一条线**，别和时机表混起来：技能的 `effects` 不注册进
--- skill_table，而是在出手时由 `buildEffectHandler` 现收现触发——见下面"效果"一节。
---
--- 18 个时机类都在 core/events 里定义（全局数据类 + require 返回的类表），这里 require
--- 进来直接用，不需要单独的 timing 注册文件。
---
--- 本文件假设环境已由 seer.lua（或测试脚本）备好：`class`（middleclass）、
--- `Util` / `Log` / `Rng`，以及全局的 `Skill` / `Pet` / `TriggerEvent` 与
--- 数据类（BattleStartData / TurnData / DecidePriorityData / AttackData /
--- DamageData / BattleEndData）。
+-- 战斗流程由 run 串联，所有时机统一由 trigger 创建本次 EffectHandler 结算。
+-- 效果挂在 GameObject 上；开局只登记双方对象，不把效果复制到逻辑层的全局索引。
 
 local EV = require "core.events"
 local Elements = require "core.elements"
-
--- 效果链路（见下面"效果"一节）：
---   * EffectHandler 是**效果**的调度器（候选池 → 排序 → 筛选 → 执行），和 GameLogic
---     是一对：GameLogic 决定"哪些效果进候选池"，handler 决定"候选池怎么跑"。
---     它是核心件，直接 require（加载不到就说明包坏了，该当场炸）。
---   * Unit（对战方）**正在并行重写**，现在还是个空壳，所以 pcall 判空加载：
---     拿不到就是"单位身上的 buff 收集不到"，不影响"当前技能的效果"这条主链。
 local EffectHandler = require "core.effect.effect_handler"
-local ok_unit, UnitModule = pcall(require, "core.unit")
-local Unit = (ok_unit and type(UnitModule) == "table") and UnitModule or nil
+local Unit = require "core.unit"
+local BattleRoom = require "server.battleroom"
 
 local G = EV.gameflow   -- BattleStart/TurnStart/TurnReady/DecidePriority/TurnEnd/AfterTurnEnd/BattleEnd
 local A = EV.attack     -- BeforeAttack/AttackStart/DamageParamCalculate/.../AttackEnd
@@ -49,7 +14,8 @@ local A = EV.attack     -- BeforeAttack/AttackStart/DamageParamCalculate/.../Att
 ---@class GameLogic: Object
 ---@field public pets Pet[] @ 参战精灵（平铺数组）
 ---@field public sides table<integer, Pet[]> @ 两边精灵：sides[1] / sides[2]
----@field public skill_table table<TriggerEvent, table> @ 时机类 -> 触发器列表（时机表）
+---@field public units Unit[] @ 双方玩家；效果由玩家自己挂载
+---@field public room BattleRoom @ 局内对象与信息容器
 ---@field public rng Rng @ 确定性随机数
 ---@field public round integer @ 当前大回合数
 ---@field public game_over boolean
@@ -63,15 +29,30 @@ GameLogic = class("GameLogic")
 ---  opts.rng_seed integer|string? @ 随机种子（没有 opts.rng 时用）
 ---  opts.rng     Rng? @ 已构造好的随机数发生器
 ---  opts.max_rounds integer? @ 回合上限，默认 999
----  opts.room    any? @ 战局容器（freekill 兼容位，可留空）
+---  opts.units   Unit[]? @ 显式玩家对象，优先于 sides/pets
+---  opts.room    BattleRoom? @ 省略时自动创建房间
 function GameLogic:initialize(opts)
   opts = opts or {}
-  self.room = opts.room
+  self.room = opts.room or BattleRoom:new()
   self.rng = opts.rng or Rng:new(opts.rng_seed or 0)
   self.max_rounds = opts.max_rounds or 999
 
   -- ---- 1. 导入双方精灵 ----
-  self.sides = opts.sides or self:_defaultSides(opts.pets or {})
+  local units = opts.units
+  if units == nil and #self.room.units > 0 then units = self.room.units end
+  local sides = opts.sides
+  if units ~= nil then
+    sides = {}
+    for i, unit in ipairs(units) do sides[i] = unit:getPets() end
+  end
+  self.sides = sides or self:_defaultSides(opts.pets or self.room.pets)
+  for side, pets in ipairs(self.sides) do
+    for seat, pet in ipairs(pets) do pet.side = side; pet.seat = seat end
+  end
+  self.units = units or {
+    Unit:new{ id = 1, pets = self.sides[1] },
+    Unit:new{ id = 2, pets = self.sides[2] },
+  }
   self.pets = {}
   for _, side in ipairs(self.sides) do
     for _, pet in ipairs(side) do
@@ -79,8 +60,11 @@ function GameLogic:initialize(opts)
     end
   end
 
-  -- 时机表 / 事件记录
-  self.skill_table = {}            -- 时机类 -> 触发器数组
+  self.room.logic = self
+  self.room.units = self.units
+  self.room.pets = self.pets
+
+  -- 只保存时机记录，不持有全局效果或触发器索引。
   self.current_timing_id = 0
   self.event_log = {}
 
@@ -118,127 +102,67 @@ function GameLogic:_defaultSides(pets)
   return { side1, side2 }
 end
 
--- ============================ 时机表 ============================
+-- ============================ 时机与效果 ============================
 
---- 把一个技能的时机钩子（skill.triggers）登记进时机表。
----
---- ⚠ 技能上的 `triggers` 字段已随重构删除（见 core/skill.lua）：技能不再自带时机钩子，
----   要挂时机就用 Effect（timing + on_use），由下面的 buildEffectHandler 收集。
----   所以这个方法现在**跑起来什么都不会登记**（`pairs(nil or {})`）——留着是因为
----   时机表本身还在用，将来"按名字挂时机的印记 / 特性"会走同一个结构。
----@param skill Skill
----@param owner Pet @ 拥有这个技能的精灵（触发器的"我代表谁"）
-function GameLogic:addTriggerSkill(skill, owner)
-  for timing_class, spec in pairs(skill.triggers or {}) do
-    self.skill_table[timing_class] = self.skill_table[timing_class] or {}
-    table.insert(self.skill_table[timing_class], {
-      skill = skill,
-      owner = owner,
-      priority = spec.priority or 0,
-      can_trigger = spec.can_trigger,
-      on_trigger = spec.on_trigger,
-    })
+--- 登记双方的常驻效果来源。重复调用按对象去重，不重复挂载效果。
+--- 当前流程让所有存活精灵行动，因此登记双方全部精灵；出战/替补规则后续单独实现。
+--- 技能不在这里登记，它的效果仅由当前攻击上下文临时提供。
+function GameLogic:registerEffectSources()
+  for _, unit in ipairs(self.units) do
+    self.room:registerEffectSource(unit)
+    for _, pet in ipairs(unit:getPets()) do
+      self.room:registerEffectSource(pet)
+    end
   end
 end
 
---- 触发一个时机：创建 TriggerEvent，按优先级跑一遍挂在上面的触发器。
----@param timing_class TriggerEvent @ 时机类（G.BattleStart / A.BeforeAttack ...）
----@param target GameObject?
----@param data TriggerData?
----@return boolean broken @ 是否被打断
----@return TriggerEvent ev
-function GameLogic:trigger(timing_class, target, data)
-  local ev = timing_class:new(self, target, data)
-  table.insert(self.event_log, ev)
-
-  local triggers = self.skill_table[timing_class]
-  if triggers and #triggers > 0 then
-    -- 优先级降序，同级按技能名排序（保证顺序确定）
-    local sorted = {}
-    for _, tr in ipairs(triggers) do table.insert(sorted, tr) end
-    table.sort(sorted, function(a, b)
-      if a.priority ~= b.priority then return a.priority > b.priority end
-      return (a.skill and a.skill.name or "") < (b.skill and b.skill.name or "")
-    end)
-
-    for _, tr in ipairs(sorted) do
-      local ok = tr.can_trigger == nil
-        or tr.can_trigger(tr.skill, ev, target, tr.owner, data)
-      if ok then
-        local broken = tr.on_trigger(tr.skill, ev, target, tr.owner, data)
-        if broken then
-          ev.broken = true
-          ev.break_reason = tr.skill and tr.skill.name
-          break
-        end
+--- 从对象自己的挂载表中筛出本时机的效果，不把其他时机放入 handler。
+--- 同一个挂载对象被多个入口引用时只收集一次；不同拥有者可以共用同一效果定义。
+---@param timing TriggerEvent @ 时机类
+---@param ctx EffectContext
+---@return EffectHandler
+function GameLogic:buildEffectHandler(timing, ctx)
+  local handler = EffectHandler:new()
+  local seen = {}
+  local function collect(object, owner)
+    if object == nil or seen[object] then return end
+    seen[object] = true
+    for _, effect in ipairs(object:getEffects()) do
+      if effect:getTiming() == timing then
+        handler:addEffect(owner or object, effect, object)
       end
     end
   end
 
-  return ev.broken == true, ev
-end
-
--- ============================ 效果（Effect）============================
---
--- 和上面那张"时机表"是两条不同的路：
---   * 时机表（skill_table）——**常驻**：进场时登记一次，之后每个回合都可能被问到；
---   * 效果（EffectHandler）——**一次性**：某件事发生的当下，把"这一刻有资格的效果"
---     收进候选池，跑完就丢。
---
--- 职责边界照 core/effect/effect_handler.lua 文件头写的来：handler 只管
--- "这批效果怎么排序、筛选、执行"，**哪些效果有资格进候选池由这里（BattleLogic）决定**。
--- 所以收集逻辑写在 GameLogic 里，handler 不知道效果是从哪来的。
-
---- 收集"这一瞬间"该参与结算的效果，造一个 EffectHandler。
----
---- 目前收两处：
----   ① 当前技能的效果：`ctx.skill:getEffects()`，owner = 使用者（ctx.source）——**主链**；
----   ② 使用者所属对战方（Unit）身上的 buff，owner = 那个 unit —— 见下面的 TODO。
----
---- ctx 由调用方给（目前是 doAttack）：`source` / `target` / `skill` / `logic` / `damage`。
----@param ctx table
----@return EffectHandler
-function GameLogic:buildEffectHandler(ctx)
-  ctx = ctx or {}
-  local source = ctx.source
-  local handler = EffectHandler:new()
-
-  -- ① 当前技能挂的效果（`Skill.effects` 是 Effect 实例数组，见 core/skill.lua）。
-  --    用 `type(...) == "function"` 探一下而不是直接调：ctx.skill 可能是 nil
-  --    （这条链路将来被别处复用的时候），别当场炸掉。
-  local skill = ctx.skill
-  if skill ~= nil and type(skill.getEffects) == "function" then
-    handler:addEffects(source, skill:getEffects())
-  end
-
-  -- ② 使用者所属"对战方"（Unit）身上的 buff。
-  --
-  -- TODO(并行开发中)：core/unit.lua 现在还是空壳（没有 initialize，也还没有 buffs 字段），
-  --   Pet 上也没有指回对战方的字段（`pet.owner_unit` / `pet.unit` 都还不存在），
-  --   所以这一段**目前永远走不到**——刻意写得很简单，等 Unit 落地之后再补：
-  --   那时应该由 GameLogic 自己维护一份 "pet → unit" 的映射（或让 Unit 在收精灵时
-  --   回填 pet.owner_unit），而不是让 Pet 反过来认识 Unit。
-  if Unit ~= nil then
-    local unit = source ~= nil and (source.owner_unit or source.unit) or nil
-    if unit ~= nil and type(unit.buffs) == "table" then
-      handler:addEffects(unit, unit.buffs)
-    end
-  end
-
+  -- 固定收集顺序，同优先级按这个顺序执行：当前技能、房间、登记的常驻对象。
+  collect(ctx.skill, ctx.source)
+  collect(self.room)
+  for _, object in ipairs(self.room:getEffectSources()) do collect(object) end
   return handler
 end
 
---- 触发某个时机上的效果：收集 → `EffectHandler:trigger`。
----
---- 每次都**新造一个 handler**：候选池是"这一瞬间的"，不该跨时机复用
---- （想复用就自己接住 buildEffectHandler 的返回值）。
----@param timing TriggerEvent|string @ 时机（A.AfterAttack 之类的时机类，或同名串）
----@param ctx table @ 结算上下文（原样传给 Effect 的 can_trigger / on_cost / on_use）
----@return EffectHandler @ 用过的那一个（调试/断言用得上）
-function GameLogic:triggerEffects(timing, ctx)
-  local handler = self:buildEffectHandler(ctx)
-  handler:trigger(timing, ctx)
-  return handler
+--- 唯一时机入口：创建事件 → 收集匹配效果 → 同步结算。
+--- 保留原来的 target/data 和 broken/event 返回协议。action 只由当前技能流程显式传入，
+--- 不保存为 logic 的临时字段，因此嵌套攻击和回合时机不会误用上一次技能的效果。
+---@param timing_class TriggerEvent @ 时机类（SeerTiming.Xxx）
+---@param target GameObject?
+---@param data TriggerData?
+---@param action table? @ 本次动作的 { source, skill }，仅在该动作的时机里生效
+---@return boolean broken
+---@return TriggerEvent event
+function GameLogic:trigger(timing_class, target, data, action)
+  local event = timing_class:new(self, target, data)
+  table.insert(self.event_log, event)
+  local ctx = {
+    logic = self, room = self.room, event = event, timing = timing_class,
+    target = target, data = data,
+    source = action and action.source or (data and data.source),
+    skill = action and action.skill,
+    damage = data and data.damage,
+  }
+  event.handler = self:buildEffectHandler(timing_class, ctx)
+  event.handler:resolve(ctx)
+  return event.broken == true, event
 end
 
 -- ============================ 查询 / 行动 ============================
@@ -375,23 +299,24 @@ end
 
 --- 一次攻击：命中判定 → 连击 → 每击走伤害链 → 扣 PP。
 function GameLogic:doAttack(source, skill, target)
+  -- 显式传递给本次攻击的全部时机，技能效果不注册成常驻来源。
+  local action = { source = source, skill = skill }
   local data = AttackData:new{
     source = source, target = target, skill = skill,
     hits = 1, damage = 0, missed = false, crit = false,
   }
 
-  self:trigger(A.BeforeAttack, target, data)
-  if data.prevented then return end
-  self:trigger(A.AttackStart, target, data)
+  local broken = self:trigger(A.BeforeAttack, target, data, action)
+  if broken or data.prevented then return end
+  self:trigger(A.AttackStart, target, data, action)
 
   -- 命中判定（nil / <=0 = 必中）。
-  -- 打空就到此为止：技能的效果链（下面的 triggerEffects）也**不结算**——
-  -- "命中后 5% 麻痹"这类效果本来就不该在打空时触发。TODO 与实机核对。
+  -- 未命中仍触发 AttackEnd；命中后效果请挂 AfterAttack，或自行检查 data.missed。
   local acc = skill:getAccuracy()
   if acc and acc > 0 and not self.rng:chance(acc) then
     data.missed = true
     self:notify{ type = "SkillMissed", source = source, target = target, skill = skill }
-    self:trigger(A.AttackEnd, target, data)
+    self:trigger(A.AttackEnd, target, data, action)
     return
   end
 
@@ -409,12 +334,12 @@ function GameLogic:doAttack(source, skill, target)
     if self:isFainted(target) then break end
     local dmg = self:calcParams(source, target, skill)
 
-    self:trigger(A.DamageParamCalculate, target, dmg)
-    self:trigger(A.BeforeDamageCalculate, target, dmg)
+    self:trigger(A.DamageParamCalculate, target, dmg, action)
+    self:trigger(A.BeforeDamageCalculate, target, dmg, action)
     dmg.damage = self:damageFormula(dmg)      -- DamageCalculate 的核心动作
-    self:trigger(A.DamageCalculate, target, dmg)
-    self:trigger(A.AfterDamageCalculate, target, dmg)
-    self:trigger(A.FinalDamageCalculate, target, dmg)
+    self:trigger(A.DamageCalculate, target, dmg, action)
+    self:trigger(A.AfterDamageCalculate, target, dmg, action)
+    self:trigger(A.FinalDamageCalculate, target, dmg, action)
 
     if dmg.prevented or dmg.damage < 1 then
       self:notify{ type = "DamagePrevented", source = source, target = target, skill = skill }
@@ -427,19 +352,11 @@ function GameLogic:doAttack(source, skill, target)
 
   self:usePP(source, skill, 1)
 
-  self:trigger(A.AttackReady, target, data)
-  self:trigger(A.Attack, target, data)
-  self:trigger(A.AfterAttack, target, data)
+  self:trigger(A.AttackReady, target, data, action)
+  self:trigger(A.Attack, target, data, action)
+  self:trigger(A.AfterAttack, target, data, action)
 
-  -- 效果链路：当前技能挂在 AfterAttack 上的效果，在这里真正结算（收集见 buildEffectHandler）。
-  -- 位置是刻意的：上面循环里的 changeHp 已经扣完血，所以效果拿到的 ctx.damage 和
-  -- ctx.source.hp 都是"这一击之后"的最终值——"攻击后回血 / 吸血"这类效果就该在这时算。
-  -- 生效范围（目标、威力、倍率）由效果自己的 on_use 决定，这里只递上下文。
-  self:triggerEffects(A.AfterAttack, {
-    source = source, target = target, skill = skill, logic = self, damage = data.damage,
-  })
-
-  self:trigger(A.AttackEnd, target, data)
+  self:trigger(A.AttackEnd, target, data, action)
 end
 
 --- 一个大回合：双方选行动 → 定先后手 → 逐个出手 → 收尾。
@@ -521,12 +438,8 @@ function GameLogic:run()
     error("GameLogic:run 需要双方各至少一只精灵", 2)
   end
 
-  -- ===== 2. 加载技能到时机表 =====
-  for _, pet in ipairs(self.pets) do
-    for _, skill in ipairs(pet:getSkills()) do
-      self:addTriggerSkill(skill, pet)
-    end
-  end
+  -- ===== 2. 在 BattleStart 之前登记双方对象（效果已经挂在各自对象上）=====
+  self:registerEffectSources()
 
   -- ===== 3. 游戏循环 =====
   self:trigger(G.BattleStart, nil, BattleStartData:new{})

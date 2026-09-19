@@ -10,16 +10,16 @@
 --   * GameEvent（流程事件） —— 协程。某件事"怎么一步步走完"，能停下等、能打断。
 -- 这里是**时机**，对应 freekill 的 `ltk/core/trigger_event.lua`。
 --
--- 本文件只写**定义**（字段 + 基础辅助方法）。真正的调度逻辑（按优先级问一遍、
--- 询问玩家、打断、refresh 前后两轮）会单独实现，因为它依赖 BattleLogic 与
--- 触发器表，是执行层的事。
+-- 本文件定义时机数据与辅助方法；GameLogic:trigger 收集本时机效果，
+-- EffectHandler 按优先级同步结算并设置 broken。GameEvent 仍负责流程层的协程。
 --
 -- 与 freekill 的差异：`target` 不再是 ServerPlayer（三国杀的"角色"），而是
 -- GameObject（赛尔号里"精灵/道具/场地物件"的统一基类），见 core/gameobject.lua。
 
 ---@class TriggerEvent: Object
 ---@field public id integer @ 时机编号（每次触发递增）
----@field public logic BattleLogic @ 所属战局
+---@field public handler EffectHandler? @ 本次时机的效果集（用于调试）
+---@field public logic GameLogic @ 所属战局
 ---@field public target GameObject? @ 这次时机"对准"的对象（谁掉血、谁行动……）
 ---@field public data TriggerData @ 时机的附加数据（各时机有自己的 data 类）
 ---@field public skill_data table<string, table<string, any>> @ 某个技能在这个时机范围内的私有数据
@@ -30,7 +30,7 @@
 ---@field public break_reason string? @ 被谁打断的（技能名）
 TriggerEvent = class("TriggerEvent")
 
----@param logic BattleLogic
+---@param logic GameLogic
 ---@param target GameObject?
 ---@param data TriggerData?
 function TriggerEvent:initialize(logic, target, data)

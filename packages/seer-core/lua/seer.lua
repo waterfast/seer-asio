@@ -151,6 +151,8 @@ for _, klass in ipairs(Timings) do
   Seer.timing_types[klass.name] = klass
 end
 
+GameObject = load("core.gameobject")
+
 local SkillModule = load("core.skill")
 Skill = SkillModule.Skill
 
@@ -161,44 +163,12 @@ PetSpecies = PetModule.PetSpecies
 -- 属性克制表：由 Seer:initialize 里的 loadElements() 装好（加载失败会退化成中性并告警）
 Elements = Seer:getElements()
 
--- ---------------------------- 5. 效果 ----------------------------
---
--- 效果体系现在是两个文件（仍然**没有 `core/effect/init.lua`**，所以
--- `require "core.effect"` 会失败，这里按文件名逐个载）：
---
---   core/effect/effect.lua          Effect（一个效果：id / timing / 三个动作）
---   core/effect/effect_handler.lua  EffectHandler（一批效果：收集 → 排序 → 筛选 → 执行）
---
--- 两个都是"加载失败只告警、不 error"：效果没了，核心（技能 / 精灵 / 对战循环）
--- 照样该能起来跑。
--- （历史上还有 core/effect/kinds.lua 那套"效果类型注册表"，已随重构删除。）
-local ok_effect, EffectModule = pcall(require, "core.effect.effect")
-Effect = ok_effect and EffectModule or nil
-if not ok_effect then
-  Log.warning(("core/effect/effect.lua 加载失败：Seer:createEffect 目前不可用（%s）")
-    :format(tostring(EffectModule)))
-end
-
--- 效果处理器：`GameLogic:triggerEffects` 靠它把"当前技能的效果"跑起来。
--- 加载失败就只剩"技能上有效果、但没人执行"，所以要明确告警。
-local ok_handler, HandlerModule = pcall(require, "core.effect.effect_handler")
-EffectHandler = ok_handler and HandlerModule or nil
-if not ok_handler then
-  Log.warning(("core/effect/effect_handler.lua 加载失败：效果触发链"
-    .. "（GameLogic:triggerEffects）不可用（%s）"):format(tostring(HandlerModule)))
-end
-
--- ---------------------------- 5.1 对战方（Unit）----------------------------
---
--- Unit = 一个对战方（玩家那一侧：id / name / pets / buffs），GameLogic 收"单位身上的
--- buff 效果"时要认它。**这个文件正在并行重写**，现在还是个空壳，所以同样判空加载：
--- 拿不到只是"单位身上的 buff 收集不到"，不影响"当前技能的效果"这条主链（见 gamelogic）。
-local ok_unit, UnitModule = pcall(require, "core.unit")
-Unit = (ok_unit and type(UnitModule) == "table") and UnitModule or nil
-if Unit == nil then
-  Log.warning(("core/unit.lua 加载失败：对战方（Unit）不可用（%s）")
-    :format(tostring(UnitModule)))
-end
+-- ---------------------------- 5. 效果与对战方 ----------------------------
+-- trigger 的必需依赖：加载失败直接报错，避免战斗静默丢失效果。
+Effect = load("core.effect.effect")
+EffectHandler = load("core.effect.effect_handler")
+Unit = load("core.unit")
+BattleRoom = load("server.battleroom")
 
 -- ---------------------------- 6. 印记（暂不加载）---------------------------
 --
@@ -254,6 +224,7 @@ SeerCore = {
   Seer = Seer,
 
   -- 基类
+  GameObject = GameObject,
   TriggerEvent = TriggerEvent,
   TriggerData = TriggerData,
   Skill = Skill,
@@ -261,7 +232,8 @@ SeerCore = {
   PetSpecies = PetSpecies,
   Effect = Effect,
   EffectHandler = EffectHandler,   -- 效果的调度器（收集 → 排序 → 筛选 → 执行）
-  Unit = Unit,                     -- 对战方（并行重写中，可能为 nil）
+  Unit = Unit,                     -- 挂载玩家方效果
+  BattleRoom = BattleRoom,         -- 局内状态与效果来源容器
 
   -- 时机：18 个类（按战斗流程顺序）+ 两组分类
   Timings = Timings,
