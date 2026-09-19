@@ -38,61 +38,34 @@
 -- * 「灭生啸」官方是"降低对方 10 点战斗时的最高体力"，我们暂时用**附加 10 点固定伤害**
 --   近似（要真做需要"最大体力变化"的机制）。
 -- * 「末日宣告」官方是"3 回合内每回合都能附加 30 点固定伤害"——这就是**挂一个印记**，
---   本文件里用 `dot30` 这个包内印记演示（见下面的 `marks`）。
+--   本文件原来用 `dot30` 这个包内印记演示，见下面"重构后的状态"。
 -- * 特性（魂印）没抄，见 species.lua 的 TODO。
+--
+-- ---------------------------- 重构后的状态（必读）----------------------------
+--
+-- 这份表**只保留了纯数据**（名字 / 图鉴id / 属性 / 类别 / 威力 / PP / 命中 /
+-- 先制 / 暴击率 / hits），所以它现在能直接被 `Seer:createSkill` 吃进去。
+-- 下面两类东西被清掉了，因为它们指向的东西已经被重构删除，留着就是死引用：
+--
+--   1. **旧的 `marks = {...}`（charge / dot30 两个包内印记）**：
+--      `Mark.register` / `Seer:addMark` 现在都不存在（core/mark 依赖的
+--      `OwnedTrigger` 还没重建），`[SeerTiming.DetermineDamage]` /
+--      `[SeerTiming.RoundEnd]` 这些旧时机名也不存在（现在的时机是
+--      core/events 里那 18 个类）。旧内容见 git 历史。
+--   2. **两个"特性"占位技能（静电庇护 / 不灭战意）**：它们用
+--      `tags = { Skill.Ability, Skill.Compulsory }`（这两个常量从来没定义过）
+--      和 `pet:getHpRatio()/isFainted()/getStatStage()`（Pet 上已删除）。
+--
+-- ⚠ 每个技能上的 `effects = { { kind = "...", ... } }` **是数据、不是代码**：
+--   它现在既不会被校验也不会被执行（`Skill` 只是原样存着），
+--   但 `kind = ...` 那套写法属于**已被删除的效果类型系统**（原 core/effect/kinds.lua）。
+--   等效果系统重建后，这里要按新的 `Effect` spec（`Seer:createEffect{ id = ..., ... }`）
+--   重新对齐一遍——现在留着是因为它记录了每个技能到底该干什么，比丢掉强。
+--   其中「惊雷切」的 `condition` 原本调 `ctx.source:getHpRatio()`（已删除），
+--   已就地改成 TODO。
 
 return {
   name = "standard",
-
-  -- ============================ 包内自定义的印记 ============================
-  -- 印记是**数据**：`Mark.register(key, def)` 一张表就是新印记。
-  -- 包可以自己加，不用改核心——这是"异常状态和增益印记共用一个基类"的直接好处。
-  marks = {
-    -- 增益印记：接下来 1 回合自己的电系招式伤害翻倍（官方效果ID 42）
-    -- 它演示了"增益印记也能改伤害"——和异常状态共用同一套机制，只是 mark_type 不同。
-    {
-      key = "charge",
-      name = "充电",
-      desc = "增益类印记：接下来 1 回合自己使用电系招式的伤害翻倍",
-      mark_type = "buff",
-      duration = 1,
-      triggers = {
-        [SeerTiming.DetermineDamage] = {
-          priority = 0,
-          on_trigger = function(trig, timing, target, pet, data)
-            local mark = trig.mark
-            if data.source ~= mark.pet then return false end
-            if data.element ~= "电" then return false end
-            data.damage = data.damage * 2
-            return false
-          end,
-        },
-      },
-    },
-    {
-      key = "dot30",
-      name = "持续创伤",
-      desc = "弱化类印记：每大回合末额外受到 30 点固定伤害（末日宣告用）",
-      mark_type = "weaken",
-      duration = 3,
-      triggers = {
-        [SeerTiming.RoundEnd] = {
-          priority = 0,
-          on_trigger = function(trig, timing, target, pet, data)
-            local mark = trig.mark
-            if mark.pet == nil or mark.pet:isFainted() then return false end
-            mark.logic:damage{
-              target = mark.pet,
-              fixed = 30,
-              reason = mark.def.name,
-              is_status_damage = true,
-            }
-            return false
-          end,
-        },
-      },
-    },
-  },
 
   skills = {
     -- ============================ 雷伊（电系）============================
@@ -139,10 +112,12 @@ return {
     { name = "惊雷切", id = 10168, element = "电", category = Skill.Physical,
       power = 55, pp = 25, accuracy = 100,
       effects = {
+        -- TODO(效果系统未重建)：条件原本写的是 `ctx.source:getHpRatio() < 0.5`，
+        -- 而 `pet:getHpRatio()` 已随重构从 Pet 上删除（当前体力现在由战斗逻辑管，
+        -- 见 server/gamelogic.lua 里的 pet.hp / pet.max_hp）。等效果系统重建、
+        -- 定下"效果怎么拿到当前体力"之后再补回来。
         { kind = "power_modifier", multiplier = 2, phase = "before",
-          condition = function(effect, ctx)
-            return ctx.source:getHpRatio() < 0.5
-          end },
+          condition = nil },
       } },
 
     { name = "电闪雷鸣", id = 10173, element = "电", category = Skill.Special,
@@ -184,8 +159,9 @@ return {
     --
     -- 注意这里**没有**任何"因为是第五技能所以要满足某个前提"的条件：
     -- 赛尔号的第五技能一样有 PP，机制上和普通技能没有区别，区别只在于它摆在
-    -- 单独一个技能位上。真想禁止某个技能使用，用 `usable = false`、或者
-    -- `pet:sealSkill(name)`、或者把 PP 耗光——和它是不是第五技能无关。
+    -- 单独一个技能位上。真想禁止某个技能使用，用 `usable = false`，
+    -- 或者把 PP 耗光——和它是不是第五技能无关。
+    -- （旧注释里还提到 `pet:sealSkill(name)`：封招机制随重构删掉了，见 core/mark 的 TODO。）
     { name = "元气电光球", id = 10824, element = "电", category = Skill.Special,
       power = 140, pp = 10, accuracy = 0,
       effects = { { kind = "mark", mark = "paralysis", probability = 5 } } },
@@ -287,41 +263,17 @@ return {
     { name = "联盟的审判", id = 13582, element = "战斗", category = Skill.Physical,
       power = 300, pp = 1, accuracy = 0 },
 
-    -- ============================ 特性（占位）============================
-    -- TODO: 官方"魂印"效果还没抄（网页是 JS 渲染的，抓不到）。
-    -- 这两个是演示用的占位特性，写法本身是真的：特性 = 挂在时机上的技能。
-
-    { name = "静电庇护", category = Skill.Status,
-      tags = { Skill.Ability, Skill.Compulsory }, target = "self",
-      triggers = {
-        [SeerTiming.RoundEnd] = {
-          priority = 0,
-          can_trigger = function(self, timing, target, pet, data)
-            return pet:getHpRatio() < 1 / 3 and not pet:isFainted()
-          end,
-          on_trigger = function(self, timing, target, pet, data)
-            timing.logic:recover{
-              target = pet, num = math.max(1, math.floor(pet.max_hp / 8)), reason = "静电庇护",
-            }
-            return false
-          end,
-        },
-      } },
-
-    { name = "不灭战意", category = Skill.Status,
-      tags = { Skill.Ability, Skill.Compulsory }, target = "self",
-      triggers = {
-        [SeerTiming.HpChanged] = {
-          priority = 0,
-          can_trigger = function(self, timing, target, pet, data)
-            if data.who ~= pet or data.num >= 0 then return false end
-            return pet:getHpRatio() < 0.5 and pet:getStatStage("attack") < 3
-          end,
-          on_trigger = function(self, timing, target, pet, data)
-            timing.logic:doStatChange{ target = pet, stages = { attack = 1 }, reason = "不灭战意" }
-            return false
-          end,
-        },
-      } },
+    -- ============================ 特性（魂印）：待重建 ============================
+    --
+    -- TODO: 这里原来放着两个演示用的"特性"占位技能（静电庇护 / 不灭战意），
+    -- 已随重构删除，因为它们整个是基于已删除的 API 写的：
+    --   * tags = { Skill.Ability, Skill.Compulsory }  —— 这两个标签常量从来没有定义过；
+    --   * [SeerTiming.RoundEnd] / [SeerTiming.HpChanged] —— 旧时机名，
+    --     现在的 18 个时机见 core/events（流程类叫 TurnEnd / AfterTurnEnd …）；
+    --   * pet:getHpRatio() / pet:isFainted() / pet:getStatStage() —— Pet 上已删除；
+    --   * timing.logic:recover{...} / logic:doStatChange{...} —— 现在在 GameLogic 上
+    --     对应 `logic:recover(target, num, reason)` / 能力等级机制（尚未重建）。
+    -- 官方"魂印"数据本身也还没抄（网页是 JS 渲染的，抓不到），
+    -- 等特性 = "挂在时机上的技能"这套机制在 core/events + 触发体系里重建后再补。
   },
 }
