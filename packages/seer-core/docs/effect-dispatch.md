@@ -64,7 +64,7 @@ logic:run()
 
 未命中时仍分发攻击技的 `AttackEnd` 和技能的 `AfterSkillUse`，不会分发 `AfterAttack`。`UseSkill` 统一处理 PP 和命中；攻击调用独立伤害入口，回复与直接扣血也会触发 HP 时机。完整时序、Buff 生命周期与 API 见 [战斗规则](../../../docs/battle-rules.md)。
 
-Buff 存在 `GameObject.buff_instances`，由 room 管理。普通挂载效果遵守队列快照；Buff 被消耗或驱散后，即使仍在当前快照也不再执行。唯一例外是已移除实例仍可通过 `AfterBuffRemove` 观察自己的移除结果。
+Buff 子系统位于 `lua/core/buff/`。实例存在 `GameObject.buff_instances`，每个 room 的 `buff_controller` 独立管理生命周期，Room API 只转发。普通挂载效果遵守队列快照；Buff 被消耗或驱散后，即使仍在当前快照也不再执行。唯一例外是已移除实例仍可通过 `AfterBuffRemove` 观察自己的移除结果。
 
 ## 最小验证
 

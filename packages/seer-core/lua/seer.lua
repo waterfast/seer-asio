@@ -165,7 +165,9 @@ Elements = Seer:getElements()
 
 -- ---------------------------- 5. 效果与对战方 ----------------------------
 -- trigger 的必需依赖：加载失败直接报错，避免战斗静默丢失效果。
-Buff = load("core.effect.buff")
+local BuffModule = load("core.buff")
+Buff = BuffModule.Buff
+BuffController = BuffModule.BuffController
 Effect = load("core.effect.effect")
 EffectHandler = load("core.effect.effect_handler")
 Unit = load("core.unit")
@@ -233,6 +235,7 @@ SeerCore = {
   PetSpecies = PetSpecies,
   Effect = Effect,
   Buff = Buff,
+  BuffController = BuffController,
   EffectHandler = EffectHandler,   -- 效果的调度器（收集 → 排序 → 筛选 → 执行）
   Unit = Unit,                     -- 挂载玩家方效果
   BattleRoom = BattleRoom,         -- 局内状态与效果来源容器

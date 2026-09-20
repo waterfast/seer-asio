@@ -5,6 +5,7 @@
 -- 本类不维护全局效果索引，只保留可挂载效果的对象引用。
 
 local GameObject = require "core.gameobject"
+local BuffController = require "core.buff.controller"
 
 --- 一局战斗的共享上下文；每局新建，结束后随 Session 一起释放。
 --- 效果保存在所属对象上，tags、通知队列和额外效果来源只属于当前房间。
@@ -12,6 +13,7 @@ local GameObject = require "core.gameobject"
 ---@class BattleRoom: GameObject
 ---@field public units Unit[] @ 对战方列表，与逻辑层共享对象
 ---@field public pets Pet[] @ 全部参战精灵，顺序用于分配协议座位
+---@field public buff_controller BuffController @ 本局独立的 Buff 生命周期管理器
 ---@field public logic GameLogic? @ 当前局的规则执行器
 ---@field public tags table<string, any> @ 服务端局内临时信息，不自动同步客户端
 ---@field public events table[] @ 待 Session 发送的通知
@@ -35,6 +37,7 @@ function BattleRoom:initialize(spec)
   self.events = {}
   self.seat_of = {}
   self._effect_sources = {}
+  self.buff_controller = BuffController:new(self)
   for seat, pet in ipairs(self.pets) do
     self.seat_of[pet] = seat
   end
@@ -328,119 +331,55 @@ function BattleRoom:changeHp(spec)
   return require("server.events.hp").changeHp(assert(self.logic), HpChangeData:new(spec._data or spec))
 end
 
--- ---------------------------- Buff 绑定与生命周期 ----------------------------
+-- ---------------------------- Buff 对外接口 ----------------------------
+-- Room 是规则作者的统一入口；实例挂载、生命周期和控制标记均由本房间的管理器负责。
 
---- 返回本局目标挂载的实例快照，不把效果搬到 logic 的索引中。
----@return Buff[]
+---@param target GameObject
+---@return Buff[] @ 本局目标的活跃绑定快照
 function BattleRoom:getBuffs(target)
-  local result = {}
-  for _, buff in ipairs(target.buff_instances) do
-    if buff.room == self and buff.active then result[#result + 1] = buff end
-  end
-  return result
+  return self.buff_controller:getBuffs(target)
 end
 
+---@param target GameObject
+---@param id string
 ---@return Buff?
 function BattleRoom:getBuff(target, id)
-  for _, buff in ipairs(self:getBuffs(target)) do if buff.id == id then return buff end end
+  return self.buff_controller:getBuff(target, id)
 end
 
---- 同 id 刷新为新实例（状态重置），不同 id 共存。层数/次数由各定义在 state 中管理。
---- BeforeBuffAdd 可取消；刷新不会触发「被消除」回调，只发 reason=refresh 的添加结果。
+--- 添加或刷新同 id 的绑定，事件与实例状态由 BuffController 统一管理。
 ---@param target GameObject
 ---@param spec BuffSpec
----@return Buff? @ 被阻止时 nil；第二返回值为事件结果
+---@return Buff?
 ---@return BuffChangeData
 function BattleRoom:addBuff(target, spec)
-  local logic = assert(self.logic, "Buff 需要已绑定的 GameLogic")
-  local B = require("core.events").buff
-  local buff = require("core.effect.buff"):new(self, target, spec)
-  local data = BuffChangeData:new{ target = target, source = spec.source, buff = buff,
-    previous = self:getBuff(target, spec.id), reason = "add", prevented = false, success = false }
-  if data.previous then data.reason = "refresh" end
-  if self._clearing_buffs or logic:trigger(B.BeforeBuffAdd, target, data) or data.prevented then
-    buff.active, data.prevented = false, true
-    return nil, data
-  end
-  -- 前置时机可以嵌套添加同 id，因此提交前重新定位，确保只保留一个实例。
-  local previous = self:getBuff(target, spec.id)
-  data.previous = previous
-  if previous then
-    data.reason = "refresh"
-    previous.active = false
-    for i, mounted in ipairs(target.buff_instances) do
-      if mounted == previous then table.remove(target.buff_instances, i); break end
-    end
-  end
-  table.insert(target.buff_instances, buff)
-  self:registerEffectSource(target)
-  data.success = true
-  logic:notify{ type = "BuffAdded", target = target, buff = buff.id, name = buff.name, reason = data.reason, source = data.source }
-  logic:trigger(B.AfterBuffAdd, target, data)
-  return buff, data
+  return self.buff_controller:addBuff(target, spec)
 end
 
---- 主动消耗/驱散可以被 BeforeBuffRemove 阻止；到期/战斗清理是生命周期操作，不发前置。
---- 后置时机始终携带被移除的实例与 reason，效果可区分驱散、消耗、到期。
 ---@param buff Buff
 ---@param reason string?
 ---@param source GameObject?
 ---@return boolean removed
 function BattleRoom:removeBuff(buff, reason, source)
-  if not buff or buff.room ~= self or not buff.active or buff.removing then return false end
-  reason = reason or "removed"
-  if reason == "dispel" and not buff.dispellable then return false end
-  local B = require("core.events").buff
-  local data = BuffChangeData:new{ target = buff.owner, source = source, buff = buff,
-    reason = reason, success = false, prevented = false }
-  buff.removing = true -- 防止移除前置效果递归移除同一个实例。
-  if reason ~= "expired" and reason ~= "battle_end" then
-    local broken = self.logic:trigger(B.BeforeBuffRemove, buff.owner, data)
-    if broken or data.prevented then buff.removing = false; return false end
-  end
-  buff.removing = false
-  if not buff.active then return false end
-  for i, mounted in ipairs(buff.owner.buff_instances) do
-    if mounted == buff then table.remove(buff.owner.buff_instances, i); break end
-  end
-  buff.active, data.success = false, true
-  self.logic:notify{ type = "BuffRemoved", target = buff.owner, source = source, buff = buff.id, name = buff.name, reason = reason }
-  self.logic:trigger(B.AfterBuffRemove, buff.owner, data)
-  return true
+  return self.buff_controller:removeBuff(buff, reason, source)
 end
 
---- 消除指定类别（默认回合类），不影响能力等级、不可驱散绑定或其它类别。
----@return integer @ 实际移除数，可用于「消除成功则……」
+---@param target GameObject
+---@param category string? @ 默认 turn
+---@param source GameObject?
+---@return integer @ 实际驱散数
 function BattleRoom:dispelBuffs(target, category, source)
-  local count = 0
-  for _, buff in ipairs(self:getBuffs(target)) do
-    if buff.category == (category or "turn") and self:removeBuff(buff, "dispel", source) then
-      count = count + 1
-    end
-  end
-  return count
+  return self.buff_controller:dispelBuffs(target, category, source)
 end
 
---- 对来源快照及绑定快照操作，避免到期回调增删对象导致跳项。
-local function battleBuffs(room)
-  local buffs, objects = {}, room:getEffectSources()
-  table.insert(objects, 1, room)
-  for _, object in ipairs(objects) do
-    for _, buff in ipairs(room:getBuffs(object)) do buffs[#buffs + 1] = buff end
-  end
-  return buffs
-end
-
+---@param round integer @ 当前回合结束后清理
 function BattleRoom:expireBuffs(round)
-  for _, buff in ipairs(battleBuffs(self)) do
-    if buff.expires_after_round and round >= buff.expires_after_round then self:removeBuff(buff, "expired") end
-  end
+  self.buff_controller:expireBuffs(round)
 end
 
+--- 清理本局所有绑定，包括已注销效果来源的拥有者。
 function BattleRoom:clearBattleBuffs()
-  self._clearing_buffs = true
-  for _, buff in ipairs(battleBuffs(self)) do self:removeBuff(buff, "battle_end") end
-  self._clearing_buffs = false
+  self.buff_controller:clearBattleBuffs()
 end
 
 return BattleRoom

@@ -136,8 +136,8 @@ function GameLogic:buildEffectHandler(timing, ctx)
         handler:addEffect(owner or object, effect, object)
       end
     end
-    for _, buff in ipairs(object.buff_instances or {}) do
-      if buff.room == self.room and buff:isEffective(self.round) then
+    for _, buff in ipairs(self.room:getBuffs(object)) do
+      if buff:isEffective(self.round) then
         for _, effect in ipairs(buff:getEffects()) do
           if effect:getTiming() == timing then handler:addEffect(owner or object, effect, buff, buff) end
         end

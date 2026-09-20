@@ -251,6 +251,64 @@ check('被移除的 buff 不执行旧队列中的后续效果，添加/移除均
   assert(not buff.active, '自然到期不能被驱散保护永久留住')
 end)
 
+check('每房间有独立 BuffController，注销触发来源不丢失到期清理', function()
+  local logic, room, left = battle()
+  local _, other = battle()
+  assert(room.buff_controller:isInstanceOf(S.BuffController))
+  assert(room.buff_controller ~= other.buff_controller)
+  assert(room.buff_controller.room == room)
+  local called, removed = 0, 0
+  local tick = S.Effect:new{ id = 'disconnected_tick', timing = G.TurnStart,
+    on_use = function() called = called + 1 end }
+  local buff = room:addBuff(left, { id = 'disconnected', duration = 1, effects = { tick } })
+  watch(room, B.AfterBuffRemove, function(ctx)
+    if ctx.data.buff == buff then removed = removed + 1; assert(ctx.data.reason == 'expired') end
+  end)
+  room:unregisterEffectSource(left)
+  logic:trigger(G.TurnStart)
+  assert(called == 0)
+  assert(not other.buff_controller:removeBuff(buff) and buff.active)
+  room.buff_controller:expireBuffs(1)
+  room.buff_controller:expireBuffs(1)
+  assert(not buff.active and removed == 1 and #room:getBuffs(left) == 0)
+end)
+
+check('控制器清理含已注销来源，清理回调不能通过重入留下新 Buff', function()
+  local _, room, left, right = battle()
+  local a = room:addBuff(left, { id = 'permanent_a' })
+  local b = room:addBuff(right, { id = 'permanent_b' })
+  room:unregisterEffectSource(left)
+  room:unregisterEffectSource(right)
+  local removed = 0
+  watch(room, B.AfterBuffRemove, function(ctx)
+    assert(ctx.data.reason == 'battle_end')
+    removed = removed + 1
+    room:clearBattleBuffs()
+    local buff, result = room:addBuff(left, { id = 'cannot_reenter' })
+    assert(buff == nil and result.prevented)
+  end)
+  room:clearBattleBuffs()
+  assert(not a.active and not b.active and removed == 2)
+  assert(#room:getBuffs(left) == 0 and #room:getBuffs(right) == 0)
+  room:clearBattleBuffs()
+  assert(removed == 2)
+end)
+
+check('主动移除前置中结束战斗也不会留下正在移除的实例', function()
+  local _, room, left = battle()
+  local buff = room:addBuff(left, { id = 'pending_removal' })
+  local removed = 0
+  watch(room, B.BeforeBuffRemove, function(ctx)
+    room:clearBattleBuffs()
+    ctx.data.prevented = true
+  end)
+  watch(room, B.AfterBuffRemove, function(ctx)
+    assert(ctx.data.reason == 'battle_end'); removed = removed + 1
+  end)
+  room:removeBuff(buff, 'dispel')
+  assert(not buff.active and #room:getBuffs(left) == 0 and removed == 1)
+end)
+
 check('能力等级上下限、消强/解弱时机与伤害基础公式', function()
   local logic, room, left, right = battle()
   local seen = {}

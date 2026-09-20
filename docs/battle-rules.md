@@ -6,7 +6,8 @@
 
 - `GameObject.effects` 保存共享 Effect 定义；定义不得保存次数、层数、持续回合等可变局内状态。
 - `GameObject.buff_instances` 保存本对象的 Buff。实例保存 `owner/source/room/state/start_round/expires_after_round`，效果定义可共享。
-- `BattleRoom` 提供伤害、回血、直接改血、等级变化、Buff 添加/消耗/驱散入口。
+- `core/buff/buff.lua` 定义实例，`core/buff/controller.lua` 定义独立的 `BuffController`，`core/buff/init.lua` 导出两者。
+- 每个 `BattleRoom` 持有一个 `buff_controller`，负责查询、添加、刷新、消耗、分类驱散、到期和战斗清理；Room 保留相应方法作为规则作者的统一入口。
 - `GameLogic:trigger` 根据当前时机收集技能、房间、已注册对象及各自 Buff 的效果。logic 不维护所有效果的索引。
 - `EffectHandler` 只排序与执行；效果通过 `ctx.owner` 获取拥有者，通过 `ctx.buff.state` 获取实例状态。
 - `server/events/hp.lua` 是唯一局内 HP 写入实现。`GameLogic` 和 `GameEvent.Damage/Recover/ChangeHp` 都委托它，不保留另一套公式。
@@ -108,7 +109,8 @@ local removed = room:dispelBuffs(pet, "turn", caster)
 - `BeforeBuffAdd/AfterBuffAdd` 报告添加或刷新；`BeforeBuffRemove/AfterBuffRemove` 报告消耗与驱散。自然到期、战斗结束不发可阻止的移除前置，但仍发后置。
 - 同 id 刷新不冒充被消除，只发添加结果 `reason=refresh`。移除结果区分 `dispel/consumed/expired/battle_end`。
 - 当前 Handler 中已经移除的 Buff 不再执行后续效果；被移除的实例仍被临时加入自己的 `AfterBuffRemove` 队列，支持“护罩消失后……”；须检查 `ctx.data.buff == ctx.buff` 与 reason。
-- 战斗结束清空已登记对象的本局 Buff，清理回调期间不接受新 Buff。天气等额外对象通过房间注册，同样可挂载；参与战斗期间应保持注册。
+- 控制器按首次挂载顺序记录拥有者引用，实例仍保存在对象上，不建立全局效果索引。注销效果来源只停止它参与 trigger，控制器仍负责其 Buff 到期与战斗清理，避免遗留状态。天气等额外对象也适用。
+- 战斗结束清空控制器管理的本局 Buff，清理回调期间不接受新 Buff，重复或嵌套清理不会留下新绑定。
 
 本次将雷神觉醒接入 Buff（三回合致命概率增加 100 个百分点，封顶 100%）。这是本项目指定扩展，不能把它当作官方雷神觉醒原始文案。王系参考技能的旧 pet 临时字段尚未全部迁移；不会被新的分类驱散 API 自动识别。
 
