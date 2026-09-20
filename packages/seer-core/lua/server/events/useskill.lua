@@ -35,18 +35,22 @@ local function run(logic, source, skill, target)
   end
   if data.missed then
     logic:notify{ type = "SkillMissed", source = source, target = target, skill = skill.name }
-    if skill:isDamaging() then
+    if not skill:isStatus() then
       local attack = AttackData:new{ source = source, target = target, skill = skill,
         hits = 0, damage = 0, missed = true, crit = false }
       data.attack = attack
       logic:trigger(A.AttackEnd, target, attack, action)
     end
-  elseif not logic:trigger(U.SkillUsed, target, data, action) and not data.prevented then
-    if skill:isDamaging() then
-      data.attack = logic:resolveAttack(source, skill, target)
-      data.success = not data.attack.prevented
-    else
-      data.success = true
+  else
+    if logic:trigger(U.SkillUsed, target, data, action) then data.prevented = true end
+    if not data.prevented then
+      -- 以技能类别判断，零威力攻击也可能通过效果设定伤害下限。
+      if not skill:isStatus() then
+        data.attack = logic:resolveAttack(source, skill, target)
+        data.success = not data.attack.prevented
+      else
+        data.success = true
+      end
     end
   end
   logic:trigger(U.AfterSkillUse, target, data, action)

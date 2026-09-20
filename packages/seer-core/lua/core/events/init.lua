@@ -34,9 +34,11 @@ function TriggerData:__newindex(k, v)
 end
 
 local gameflow = require "core.events.gameflow"
+local hp = require "core.events.hp"
 local attack = require "core.events.attack"
 local useskill = require "core.events.useskill"
 local stat_stage = require "core.events.stat_stage"
+local buff = require "core.events.buff"
 
 --- 全部时机类，按战斗流程的先后顺序排列（每个元素是类，不是实例）。
 ---@type TriggerEvent[]
@@ -56,6 +58,14 @@ local TIMINGS = {
   attack.AfterDamageCalculate,
   attack.FinalDamageCalculate,
   attack.AttackReady,
+  hp.BeforeDamage,
+  hp.BeforeHpChange,
+  hp.AfterHpChange,
+  hp.HpReducedToZero,
+  hp.AfterDamage,
+  hp.DamageResolved,
+  hp.BeforeRecover,
+  hp.AfterRecover,
   attack.Attack,
   attack.AfterAttack,
   attack.AttackEnd,
@@ -63,6 +73,10 @@ local TIMINGS = {
   gameflow.TurnEnd,
   gameflow.AfterTurnEnd,
   gameflow.BattleEnd,
+  buff.BeforeBuffAdd,
+  buff.AfterBuffAdd,
+  buff.BeforeBuffRemove,
+  buff.AfterBuffRemove,
   stat_stage.BeforeStatStageChange,
   stat_stage.AfterStatStageChange,
   stat_stage.BeforePositiveStatStagesClear,
@@ -78,6 +92,8 @@ return {
   timings = TIMINGS,
   gameflow = gameflow,
   attack = attack,
+  hp = hp,
+  buff = buff,
   useskill = useskill,
   stat_stage = stat_stage,
 }

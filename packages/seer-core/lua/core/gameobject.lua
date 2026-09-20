@@ -5,12 +5,14 @@
 ---@class GameObject: Object
 ---@field public id integer|string? @ 对象标识；唯一性由所属容器保证
 ---@field public name string? @ 显示名
+---@field public buff_instances Buff[] @ 局内绑定实例；通过 BattleRoom API 增删
 ---@field public effects Effect[] @ 本对象挂载的效果，按挂载顺序保存
 GameObject = class("GameObject")
 
 ---@class GameObjectSpec
 ---@field public id integer|string?
 ---@field public name string?
+---@field public buff_instances Buff[] @ 局内绑定实例；通过 BattleRoom API 增删
 ---@field public effects Effect[]?
 
 ---@param spec GameObjectSpec?
@@ -19,6 +21,7 @@ function GameObject:initialize(spec)
   self.id = spec.id
   self.name = spec.name
   self.effects = {}
+  self.buff_instances = {}
   for _, effect in ipairs(spec.effects or {}) do
     self:addEffect(effect)
   end

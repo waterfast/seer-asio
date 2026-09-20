@@ -13,6 +13,7 @@
 ---@field data TriggerData? @ 本次时机可修改的数据；效果间共享
 ---@field damage integer? @ 兼容读点；修改结算数值请使用 data
 ---@field owner GameObject? @ 当前效果的拥有者；技能效果为使用者
+---@field buff Buff? @ 本效果由 buff 提供时的绑定实例
 ---@field effect_source GameObject? @ 挂载效果的对象；技能效果为 Skill
 
 ---@class EffectHandler: Object
@@ -27,11 +28,13 @@ end
 ---@param owner GameObject?
 ---@param effect Effect?
 ---@param effect_source GameObject?
-function EffectHandler:addEffect(owner, effect, effect_source)
+---@param buff Buff?
+---@param allow_inactive boolean? @ 仅用于已移除绑定观察自己的解除事件
+function EffectHandler:addEffect(owner, effect, effect_source, buff, allow_inactive)
   if effect == nil then return end
   table.insert(self.queue, {
     owner = owner, effect_source = effect_source or owner,
-    effect = effect, sequence = #self.queue + 1,
+    effect = effect, buff = buff, allow_inactive = allow_inactive, sequence = #self.queue + 1,
   })
 end
 
@@ -65,9 +68,12 @@ function EffectHandler:resolve(ctx)
     for key, value in pairs(ctx) do effect_ctx[key] = value end
     effect_ctx.owner = entry.owner
     effect_ctx.effect_source = entry.effect_source
+    effect_ctx.buff = entry.buff
     if effect_ctx.data then effect_ctx.damage = effect_ctx.data.damage end
     local effect = entry.effect
-    if effect:canTrigger(effect_ctx) and effect:cost(effect_ctx) ~= false then
+    -- 已消耗/驱散的绑定即使仍在队列快照中也不能再次触发。
+    if (entry.allow_inactive or not entry.buff or entry.buff:isEffective(ctx.logic.round))
+      and effect:canTrigger(effect_ctx) and effect:cost(effect_ctx) ~= false then
       local broken = effect:use(effect_ctx)
       if event and (broken == true or event.broken or event:breakCheck()) then
         event.broken = true

@@ -8,6 +8,7 @@ return Seer:createEffect{
     return not ctx.logic:isFainted(ctx.owner) and ctx.owner.hp < ctx.owner.max_hp
   end,
   on_use = function(effect, ctx)
-    ctx.logic:recover(ctx.owner, math.floor(ctx.owner.max_hp / 3), effect.name)
+    ctx.room:recover{ target = ctx.owner, source = ctx.source, skill = ctx.skill,
+      num = math.floor(ctx.owner.max_hp / 3), reason = effect.name, parent = ctx.data }
   end,
 }

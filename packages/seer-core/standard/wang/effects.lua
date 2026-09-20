@@ -87,25 +87,26 @@ end
 -- ============================ 王·雷伊 ============================
 
 -- 惊颤霹雳（19732）：100%概率额外附加500点固定伤害。
--- 实现在伤害公式之后追加：固定伤害不吃属性克制倍率，也不会被暴击翻倍
--- （公式里的暴击翻倍在 AfterDamageCalculate 之前就做完了）。
+-- 攻击造成有效伤害后另发一次固定伤害；有独立的伤害/HP 时机，不吃攻击增伤与暴击。
 local shock_flat = Seer:createEffect{
   id = "wang_shock_flat_500",
   name = "惊颤霹雳·附加500固定伤害",
-  timing = SeerTiming.AfterDamageCalculate,
+  timing = SeerTiming.AfterAttack,
   can_trigger = function(_, ctx)
-    -- 只在自己打出有效伤害时追加，伤害被防止时本时机根本不会到。
+    -- 被免疫、没有有效攻击伤害或目标已倒下时不追加。
     return ctx.source == ctx.owner and not ctx.data.prevented and ctx.data.damage > 0
+      and not ctx.logic:isFainted(ctx.data.target)
   end,
-  on_use = function(_, ctx)
-    ctx.data.damage = ctx.data.damage + 500
+  on_use = function(effect, ctx)
+    ctx.room:damage{ source = ctx.source, target = ctx.data.target, skill = ctx.data.skill,
+      kind = "fixed", damage = 500, reason = effect.name, parent = ctx.data }
   end,
 }
 
 -- 传承王意（24971）可做的那一段：全属性+1，自身当前体力低于对手时强化效果翻倍。
 -- "体力低于对手"按**当前体力绝对值**比较（原文措辞），不看百分比；
 -- skill target = "self"，所以对手要从房间对象里找。
--- 剩下两段（2回合每回合回满、5回合免疫反弹异常）表达不了，见技能 extra 与文档。
+-- 持续回复已有 Buff 基础但本技能尚未接线；异常状态系统未实现，见技能 extra 与文档。
 local chuancheng_boost = Seer:createEffect{
   id = "wang_chuancheng_all_stats",
   name = "传承王意·全属性强化",
@@ -135,10 +136,8 @@ local wanming_reverse = Seer:createEffect{
 
 -- 万鸣齐闪（24970）第三段的数学：自身每处于一种能力提升状态，让"直接造成的伤害"提高 10%。
 -- 这段本身是干净的（项数 ×10%），但**没有载体**：它要乘的是"直接造成 260 点电系伤害"，
--- 而核心没有规则层的固定伤害入口（logic:changeHp 是底层写血，不经过伤害时机），
--- 万鸣齐闪又是属性技、永远不进伤害链。所以这里只把数学定义出来并单测，
--- **不挂到技能上**（挂了也不会触发，只会误导读者）。待核心补
--- `logic:dealFixedDamage(target, num, element, reason)` 后再接线。
+-- 目前该技能仍未接线。核心已提供 room:damage；后续需核对电系固定伤害规则，
+-- 在技能效果中计算数值并调用该入口，不能把这段攻击增伤直接挂给属性技。
 local wanming_stage_boost = Seer:createEffect{
   id = "wang_wanming_stage_boost",
   name = "万鸣齐闪·按能力提升项增伤",
@@ -204,7 +203,7 @@ local weidou_boost = Seer:createEffect{
 
 -- 不败之境（25184）可做的那一段：全属性+1，自身当前体力高于最大体力的1/2时翻倍。
 -- 判定是**严格大于** 1/2（hp*2 > max_hp）；恰好一半按 +1 处理。
--- 剩下两段（4回合吸血、下2回合先制+2）表达不了，见技能 extra 与文档。
+-- 四回合吸血尚未接线；动态先制仍缺排序前修正入口，见技能 extra 与文档。
 local bubai_boost = Seer:createEffect{
   id = "wang_bubai_all_stats",
   name = "不败之境·全属性强化",
@@ -237,7 +236,7 @@ local jidu_reverse = Seer:createEffect{
 -- 王·圣勇战意（30158）第二段：吸取对手能力提升状态。
 -- "吸取"= 对手清掉正等级 + 同额加给自身；用现有 clearPositiveStatStages + changeStatStages
 -- 组合，正是能力等级系统的语义（清正等级走 clear_positive，不冒充弱化）。
--- 后半句"吸取成功则吸取对手300点体力"表达不了（底层写血），见文档。
+-- 后半句"吸取成功则吸取对手300点体力"尚未接线；伤害/回复基础已提供，见文档。
 local shengyong_steal = Seer:createEffect{
   id = "wang_shengyong_steal_positive",
   name = "王·圣勇战意·吸取对手能力提升",

@@ -8,6 +8,7 @@ local EffectHandler = require "core.effect.effect_handler"
 local Unit = require "core.unit"
 local BattleRoom = require "server.battleroom"
 local UseSkillFlow = require "server.events.useskill"
+local HpFlow = require "server.events.hp"
 
 local G = EV.gameflow   -- BattleStart/TurnStart/TurnReady/DecidePriority/TurnEnd/AfterTurnEnd/BattleEnd
 local A = EV.attack     -- BeforeAttack/AttackStart/DamageParamCalculate/.../AttackEnd
@@ -79,6 +80,8 @@ function GameLogic:initialize(opts)
     for _, sk in ipairs(pet:getSkills()) do
       self.pp[pet][sk.name] = sk:getPP()
     end
+    local fifth = pet:getFifthSkill()
+    if fifth then self.pp[pet][fifth.name] = fifth:getPP() end
   end
 
   self.round = 0
@@ -133,10 +136,24 @@ function GameLogic:buildEffectHandler(timing, ctx)
         handler:addEffect(owner or object, effect, object)
       end
     end
+    for _, buff in ipairs(object.buff_instances or {}) do
+      if buff.room == self.room and buff:isEffective(self.round) then
+        for _, effect in ipairs(buff:getEffects()) do
+          if effect:getTiming() == timing then handler:addEffect(owner or object, effect, buff, buff) end
+        end
+      end
+    end
   end
 
   -- 固定收集顺序，同优先级按这个顺序执行：当前技能、房间、登记的常驻对象。
   collect(ctx.skill, ctx.source)
+  -- 解除后的实例已从拥有者摘除，但仍需观察自己的解除原因（如护罩消失后触发效果）。
+  if timing == EV.buff.AfterBuffRemove and ctx.data and ctx.data.buff then
+    local removed = ctx.data.buff
+    for _, effect in ipairs(removed:getEffects()) do
+      if effect:getTiming() == timing then handler:addEffect(removed.owner, effect, removed, removed, true) end
+    end
+  end
   collect(self.room)
   for _, object in ipairs(self.room:getEffectSources()) do collect(object) end
   return handler
@@ -289,21 +306,26 @@ function GameLogic:damageFormula(dmg)
   return math.max(1, damage)
 end
 
---- 唯一改血的地方。num 可正可负。
----@return integer actual @ 实际变化量
-function GameLogic:changeHp(target, num, reason)
-  local before = target.hp
-  target.hp = math.max(0, math.min(target.max_hp or target.hp, target.hp + num))
-  local actual = target.hp - before
-  if target.hp <= 0 then target.fainted = true end
-  self:notify{ type = "HpChanged", target = target, before = before, after = target.hp, num = actual, reason = reason }
-  return actual
+--- 兼容数值式调用，返回实际变化量和完整数据。新效果优先用 room 的结构化接口。
+function GameLogic:changeHp(target, num, reason, source)
+  local data = HpFlow.changeHp(self, HpChangeData:new{
+    target = target, num = num, reason = reason, source = source,
+  })
+  return data.actual, data
 end
 
---- 回血（拒绝给已倒下的精灵回血，避免"无限复活"）。
-function GameLogic:recover(target, num, reason)
-  if self:isFainted(target) then return 0 end
-  return self:changeHp(target, num, reason or "recover")
+function GameLogic:recover(target, num, reason, source)
+  local data = HpFlow.recover(self, RecoverData:new{
+    target = target, num = num, reason = reason, source = source,
+  })
+  return data.actual, data
+end
+
+--- 统一伤害入口。第三个参数仅供 resolveAttack 发计算完成后的 AttackReady。
+---@return DamageData
+function GameLogic:damage(data, action, ready)
+  if not data.isInstanceOf or not data:isInstanceOf(DamageData) then data = DamageData:new(data) end
+  return HpFlow.damage(self, data, action, ready)
 end
 
 -- ============================ 一回合 / 一次攻击 ============================
@@ -343,32 +365,16 @@ function GameLogic:resolveAttack(source, skill, target)
   local count = math.max(1, math.min(math.floor(hits or 1), 20))
   for index = 1, count do
     if self:isFainted(source) or self:isFainted(target) then break end
-    local dmg = self:calcParams(source, target, skill)
-    dmg.index = index
+    local dmg = DamageData:new{ source = source, target = target, skill = skill,
+      kind = "attack", index = index, parent = data }
     data.damage_data = dmg
-    if not emit(A.DamageParamCalculate, dmg) and not emit(A.CriticalChanceCalculate, dmg) then
-      dmg.crit = self.rng:chance(math.max(0, math.min(100, dmg.crit_chance)))
-      if not emit(A.BeforeDamageCalculate, dmg) then
-        dmg.damage = self:damageFormula(dmg)
-        if not emit(A.DamageCalculate, dmg) and not emit(A.AfterDamageCalculate, dmg) then
-          emit(A.FinalDamageCalculate, dmg)
-        end
-      end
-    end
-    if not dmg.prevented then emit(A.AttackReady, data) end
-    if data.prevented or dmg.prevented or dmg.damage < 1 then
-      self:notify{ type = "DamagePrevented", source = source, target = target, skill = skill.name }
-    else
-      local actual = -self:changeHp(target, -dmg.damage, skill.name)
-      data.damage = data.damage + actual
+    self:damage(dmg, action, function()
+      return emit(A.AttackReady, data)
+    end)
+    if dmg.actual > 0 then
+      data.damage = data.damage + dmg.actual
       data.crit = data.crit or dmg.crit
       data.hits = data.hits + 1
-      -- 普通技能先按原防御等级算伤害，再由致命消除对应防御强化；不清除负等级。
-      if dmg.crit then
-        local defense = skill:isPhysical() and "defense" or "sp_defense"
-        self.room:clearPositiveStatStages(target, source, "致命一击", { defense })
-      end
-      self:notify{ type = "Damage", source = source, target = target, damage = actual, crit = dmg.crit }
       self:trigger(A.Attack, target, data, action)
     end
     if data.prevented then break end
@@ -420,6 +426,7 @@ function GameLogic:doRound()
 
   self:trigger(G.TurnEnd, nil, td)
   self:trigger(G.AfterTurnEnd, nil, td)
+  self.room:expireBuffs(self.round)
   self:updateGameOver()
 end
 
@@ -471,6 +478,7 @@ function GameLogic:run()
     self:doRound()
   end
   self:trigger(G.BattleEnd, nil, BattleEndData:new{ winner = self.winner, reason = self.win_reason })
+  self.room:clearBattleBuffs()
   return self:getResult()
 end
 

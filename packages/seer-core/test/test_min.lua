@@ -15,7 +15,8 @@ local S = dofile(root .. "/lua/seer.lua")
 local standard = dofile(root .. "/standard/wang/init.lua")
 S.Seer:postLoad()
 local automatic = arg[1] == "--auto"
-local seed = automatic and arg[2] or arg[1]
+local seed
+if automatic then seed = arg[2] else seed = arg[1] end
 seed = tonumber(seed) or seed or 123
 
 local wangLeiyi, wangGaiya = standard.pets[1], standard.pets[2]
@@ -77,19 +78,18 @@ local function checkEffects()
   assert(labLeiyi.hp == labLeiyi.max_hp, "被免疫的攻击不应该造成伤害")
   assert(immuneEvents == 1, "免疫应发一条 AttackImmune 通知")
 
-  -- ② 惊颤霹雳：公式后追加 500 固定伤害（直接调效果：100 -> 600）
-  local dmg = damageData(labLeiyi, labGaiya, skills[19732], 100)
-  applyEffect(effects.shock_flat, labLeiyi, labLeiyi, dmg)
-  assert(dmg.damage == 600, "惊颤霹雳应附加 500 固定伤害，实际 " .. tostring(dmg.damage))
-
-  -- ②b 再走一次真实攻击流程，从扣血结果上看 +500：
-  --     把实验室盖亚体力临时拉高，避免致死时 changeHp 把实际扣血压成剩余体力。
+  -- ② 惊颤霹雳：整次攻击后单独造成 500 固定伤害；过量扣血受目标剩余 HP 限制。
   local savedMax, savedHp = labGaiya.max_hp, labGaiya.hp
   labGaiya.max_hp, labGaiya.hp = 5000, 5000
-  labLogic:resolveAttack(labLeiyi, skills[19732], labGaiya)
-  local dealt = 5000 - labGaiya.hp
-  assert(dealt >= 500, "惊颤霹雳整次攻击扣血应 >= 500（含固定伤害），实际 " .. tostring(dealt))
+  local fixed = 0
+  function labLogic:on_notify(evt)
+    if evt.type == "Damage" and evt.kind == "fixed" then fixed = fixed + evt.damage end
+  end
+  local attack = labLogic:resolveAttack(labLeiyi, skills[19732], labGaiya)
+  assert(fixed == 500, "惊颤霹雳应独立结算 500 固定伤害")
+  assert(5000 - labGaiya.hp == attack.damage + 500, "攻击伤害与附加伤害不能混算")
   labGaiya.max_hp, labGaiya.hp = savedMax, savedHp
+  local dmg
 
   -- ③ 威斗天罡破：对手负等级总和 ×10%（速度 -6 -> 1.6 倍）
   labRoom:changeStatStages(labGaiya, { speed = -6 }, labLeiyi, "测试")
@@ -233,14 +233,6 @@ checkEffects()
 local room = S.BattleRoom:new{ id = 1, pets = standard.pets }
 local logic = S.GameLogic:new{ room = room, rng_seed = seed, max_rounds = 50 }
 S.Seer:setLogic(logic)
--- 第五技能目前不进 GameLogic 的 PP 账本（initialize 只遍历 Pet:getSkills()），
--- 这里测试侧显式补账，否则第五技能永远因 0 PP 无法出手。属测试接线；
--- 根治要改 core（见 docs/unimplemented-effects.md「核心缺口」）。
-for _, pet in ipairs(standard.pets) do
-  local fifth = pet:getFifthSkill()
-  if fifth ~= nil then logic.pp[pet][fifth.name] = fifth:getPP() end
-end
-
 local usedSkillIds, fifthSeen = {}, {}
 local buffSeen = {}
 local roundSkillOrder, chosenRound = {}, 1

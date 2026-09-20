@@ -50,7 +50,8 @@ logic:run()
 
 - `ctx.source` / `ctx.target`：本次行为的来源与目标。
 - `ctx.owner`：当前效果拥有者；常驻效果是挂载对象，当前技能效果是使用者。
-- `ctx.effect_source`：实际挂载对象；技能效果在这里取得 `Skill`。
+- `ctx.effect_source`：实际挂载对象；技能效果为 `Skill`，绑定效果为 `Buff`。
+- `ctx.buff`：本次绑定实例，局内状态写在 `ctx.buff.state`。
 - `ctx.logic` / `ctx.room` / `ctx.timing` / `ctx.event`：执行器、局内容器、时机类与本次事件。
 - `ctx.data`：当前时机数据，效果之间共享，修改伤害参数等应写入这里。
 - `ctx.damage`：执行当前效果前读取的伤害兼容字段，写它不会修改结算数据。
@@ -61,7 +62,9 @@ logic:run()
 
 `timing` 应使用 `SeerTiming.Xxx` 时机类，字符串名称不会匹配。旧 `skill_table`、`addTriggerSkill`、`triggerEffects` 和 `EffectHandler:trigger` 已移除。
 
-未命中时仍分发 `AttackEnd`，不会分发 `AfterAttack`。当前 PP、连击、伤害扣血顺序和独立 `UseSkill` 流程的重构不在本次范围内。
+未命中时仍分发攻击技的 `AttackEnd` 和技能的 `AfterSkillUse`，不会分发 `AfterAttack`。`UseSkill` 统一处理 PP 和命中；攻击调用独立伤害入口，回复与直接扣血也会触发 HP 时机。完整时序、Buff 生命周期与 API 见 [战斗规则](../../../docs/battle-rules.md)。
+
+Buff 存在 `GameObject.buff_instances`，由 room 管理。普通挂载效果遵守队列快照；Buff 被消耗或驱散后，即使仍在当前快照也不再执行。唯一例外是已移除实例仍可通过 `AfterBuffRemove` 观察自己的移除结果。
 
 ## 最小验证
 
@@ -70,6 +73,7 @@ logic:run()
 ```sh
 lua5.4 tests/effect_dispatch_test.lua
 lua5.4 tests/battleroom_test.lua
+lua5.4 tests/hp_buff_test.lua
 ```
 
 测试覆盖时机过滤、开局登记、技能作用域、双方拥有者、动态挂卸、嵌套触发、共享数据、稳定顺序、打断、未命中收尾及房间隔离。不替代全面项目测试。

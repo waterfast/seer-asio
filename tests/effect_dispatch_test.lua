@@ -66,7 +66,7 @@ check("当前技能贯穿攻击全部时机，携带技能及后续回合不泄�
       calls[timing] = (calls[timing] or 0) + 1
       assert(ctx.owner == ctx.source and ctx.effect_source == skill and ctx.skill == skill)
       assert(ctx.data ~= nil)
-      if timing == A.BeforeDamageCalculate then ctx.data.power = 0 end
+      if timing == A.BeforeDamageCalculate then ctx.data.power = 1 end
     end })
   end
   local unused = Skill:new{ name = "未使用", power = 40, effects = {
@@ -157,7 +157,7 @@ check("未命中仍结算结束效果，攻击前打断阻止攻击", function()
   local ended, after = 0, 0
   local skill = Skill:new{ name = "打空", power = 40, accuracy = 1, effects = {
     Effect:new{ id = "end", timing = A.AttackEnd, on_use = function(_, ctx)
-      assert(ctx.data.missed); ended = ended + 1
+      assert(ctx.data.missed or ctx.data.prevented); ended = ended + 1
     end },
     Effect:new{ id = "hit", timing = A.AfterAttack, on_use = function() after = after + 1 end },
   } }
@@ -166,8 +166,9 @@ check("未命中仍结算结束效果，攻击前打断阻止攻击", function()
   logic:doAttack(left, skill, right)
   assert(ended == 1 and after == 0 and right.hp == right.max_hp)
   skill:addEffect(Effect:new{ id = "stop", timing = A.BeforeAttack, on_use = function() return true end })
+  logic.rng.chance = function() return true end
   logic:doAttack(left, skill, right)
-  assert(ended == 1 and right.hp == right.max_hp)
+  assert(ended == 2 and after == 0 and right.hp == right.max_hp)
 end)
 
 check("Session 使用 BattleRoom 和真实玩家分组", function()
