@@ -185,4 +185,122 @@ function BattleRoom:drainEvents()
   return events
 end
 
+-- ---------------------------- 能力等级写入入口 ----------------------------
+
+--- 检查请求，避免拼错字段或非整数等级产生无声的状态污染。
+---@param target Pet
+---@param changes table<string, integer>
+local function validateStageChanges(target, changes)
+  local allowed = {}
+  for _, field in ipairs(target.class.STAT_STAGE_FIELDS) do allowed[field] = true end
+  for field, delta in pairs(changes) do
+    assert(allowed[field], "未知能力等级: " .. tostring(field))
+    assert(math.type(delta) == "integer", "能力等级变化必须是整数")
+  end
+end
+
+--- 执行一次等级操作。先发通用/专用前置时机，再一次写入全部能力，最后发后置时机。
+--- 清除只将指定符号的等级推向 0，不会把消强算作普通弱化、把解弱算作强化。
+--- 前置效果可修改 changes、删除单项或设置 prevented；所有实际写入统一限于 [-6,6]。
+--- 前置时机允许嵌套操作，所以提交时重新读当前等级，避免覆盖嵌套操作的结果。
+---@param data StatStageChangeData
+---@return StatStageChangeData @ success/actual 表示实际结果；被取消和无变化均不发后置时机
+function BattleRoom:_applyStatStageChange(data)
+  local logic = assert(self.logic, "能力等级变化需要已绑定 GameLogic 的 BattleRoom")
+  local timing = require("core.events").stat_stage
+  local target, operation = data.target, data.operation
+  assert(target and type(target.getStatStages) == "function", "能力等级目标必须是 Pet")
+  validateStageChanges(target, data.changes)
+  local beforeTiming, afterTiming
+  if operation == "clear_positive" then
+    beforeTiming, afterTiming = timing.BeforePositiveStatStagesClear, timing.AfterPositiveStatStagesClear
+  elseif operation == "clear_negative" then
+    beforeTiming, afterTiming = timing.BeforeNegativeStatStagesClear, timing.AfterNegativeStatStagesClear
+  else
+    assert(operation == "change", "当前只实现等级增减、消强、解弱")
+  end
+  data.before = target:getStatStages()
+  data.after = target:getStatStages()
+  if logic:trigger(timing.BeforeStatStageChange, target, data) or data.prevented then
+    data.prevented = true
+    return data
+  end
+  if beforeTiming and (logic:trigger(beforeTiming, target, data) or data.prevented) then
+    data.prevented = true
+    return data
+  end
+  validateStageChanges(target, data.changes)
+  data.before = target:getStatStages()
+  data.after = target:getStatStages()
+  for _, field in ipairs(target.class.STAT_STAGE_FIELDS) do
+    local before = data.before[field]
+    local delta = data.changes[field] or 0
+    if operation == "clear_positive" then
+      delta = before > 0 and math.max(-before, math.min(0, delta)) or 0
+    elseif operation == "clear_negative" then
+      delta = before < 0 and math.min(-before, math.max(0, delta)) or 0
+    end
+    local after = math.max(target.class.STAT_STAGE_MIN, math.min(target.class.STAT_STAGE_MAX, before + delta))
+    data.after[field] = after
+    if after ~= before then
+      data.actual[field] = after - before
+      data.success = true
+    end
+  end
+  -- 全部字段准备完毕才提交，后置效果看到的是完整的本次结果。
+  for field, delta in pairs(data.actual) do target.stat_stages[field] = data.before[field] + delta end
+  if data.success then
+    logic:notify{ type = "StatStagesChanged", target = target, source = data.source,
+      operation = operation, changes = data.actual, reason = data.reason }
+    logic:trigger(timing.AfterStatStageChange, target, data)
+    if afterTiming then logic:trigger(afterTiming, target, data) end
+  end
+  return data
+end
+
+--- 按增量改变多项等级，如 { attack = 2, speed = 2 }；消强/解弱不要通过负/正增量模拟。
+---@param target Pet
+---@param changes table<string, integer>
+---@param source GameObject?
+---@param reason string?
+---@return StatStageChangeData
+function BattleRoom:changeStatStages(target, changes, source, reason)
+  return self:_applyStatStageChange(StatStageChangeData:new{
+    target = target, source = source, changes = changes, reason = reason,
+  })
+end
+
+--- 构建清除请求。fields 省略表示全部六项，传数组可以只消除本次暴击对应的防御强化。
+local function clearStages(room, target, source, reason, fields, positive)
+  local changes = {}
+  for _, field in ipairs(fields or target.class.STAT_STAGE_FIELDS) do
+    local stage = target:getStatStage(field)
+    changes[field] = ((positive and stage > 0) or (not positive and stage < 0)) and -stage or 0
+  end
+  return room:_applyStatStageChange(StatStageChangeData:new{
+    target = target, source = source, reason = reason, changes = changes,
+    operation = positive and "clear_positive" or "clear_negative",
+  })
+end
+
+--- 消除能力提升：只处理正等级，保留所有负等级；不走普通弱化语义。
+---@param target Pet
+---@param source GameObject?
+---@param reason string?
+---@param fields string[]? @ 默认全部，可指定防御或特防等子集
+---@return StatStageChangeData
+function BattleRoom:clearPositiveStatStages(target, source, reason, fields)
+  return clearStages(self, target, source, reason, fields, true)
+end
+
+--- 解除能力下降：只处理负等级，保留所有正等级；不走普通强化语义。
+---@param target Pet
+---@param source GameObject?
+---@param reason string?
+---@param fields string[]?
+---@return StatStageChangeData
+function BattleRoom:clearNegativeStatStages(target, source, reason, fields)
+  return clearStages(self, target, source, reason, fields, false)
+end
+
 return BattleRoom

@@ -7,6 +7,7 @@ local Elements = require "core.elements"
 local EffectHandler = require "core.effect.effect_handler"
 local Unit = require "core.unit"
 local BattleRoom = require "server.battleroom"
+local UseSkillFlow = require "server.events.useskill"
 
 local G = EV.gameflow   -- BattleStart/TurnStart/TurnReady/DecidePriority/TurnEnd/AfterTurnEnd/BattleEnd
 local A = EV.attack     -- BeforeAttack/AttackStart/DamageParamCalculate/.../AttackEnd
@@ -187,18 +188,18 @@ function GameLogic:getSide(side)
   return self.sides[side] or {}
 end
 
---- 默认决策：挑第一个"能打且有 PP"的技能，目标挑对面第一个活着的。
+--- 默认决策：挑第一个有 PP 的技能，按技能目标规则选择目标。
 ---（接 Request 之前先用这个把循环跑通，TODO）
 function GameLogic:pickAction(source)
   local skill = nil
   for _, sk in ipairs(source:getSkills()) do
-    if sk:isDamaging() and self:getPP(source, sk) > 0 then
+    if self:getPP(source, sk) > 0 then
       skill = sk
       break
     end
   end
   if not skill then return nil, nil end
-  local target = self:pickTarget(source)
+  local target = skill:getTarget() == "self" and source or self:pickTarget(source)
   return skill, target
 end
 
@@ -225,57 +226,67 @@ end
 
 -- ============================ 伤害 / 体力 ============================
 
---- 凑伤害参数（威力/攻防/本系/克制/暴击/随机）。
+--- 战斗有效能力值：正等级乘 (2+n)/2，负等级乘 2/(2-n)。面板保持不变。
+--- 命中等级使用独立规则，不能传入此函数；赛尔号没有独立闪避能力等级。
+---@param pet Pet
+---@param field string @ attack/defense/sp_attack/sp_defense/speed
+---@return number
+function GameLogic:getEffectiveStat(pet, field)
+  local stage = pet:getStatStage(field)
+  local multiplier = stage >= 0 and (2 + stage) / 2 or 2 / (2 - stage)
+  return pet:getStat(field) * multiplier
+end
+
+--- 命中正等级每级增加 50%；现代页游负等级使用专用表，不套攻防倍率。
+---@param pet Pet
+---@return number
+function GameLogic:getAccuracyMultiplier(pet)
+  local stage = pet:getStatStage("accuracy")
+  if stage >= 0 then return 1 + stage * 0.5 end
+  return ({ 0.85, 0.70, 0.55, 0.45, 0.35, 0.25 })[-stage]
+end
+
+--- 准备单击参数。致命判定在 CriticalChanceCalculate 之后进行，允许临时效果改概率。
+--- crit_rate 沿用旧 Skill 的“额外致命值”语义：基础 1/16，每点额外增加 1/16。
 ---@return DamageData
 function GameLogic:calcParams(source, target, skill)
   local element = skill:getElement() or source:getPrimaryElement()
   local physical = skill:isPhysical()
-  local attack = source:getStat(physical and "attack" or "sp_attack")
-  local defense = target:getStat(physical and "defense" or "sp_defense")
-
-  local multiplier = 1
-  if element then
-    multiplier = Elements.getMultiplier(element, target:getElements())
-  end
-
-  -- 本系加成：技能属性 == 使用者的属性之一
+  local attack = self:getEffectiveStat(source, physical and "attack" or "sp_attack")
+  local defense = self:getEffectiveStat(target, physical and "defense" or "sp_defense")
+  local multiplier = element and Elements.getMultiplier(element, target:getElements()) or 1
   local stab = 1
   if element then
-    for _, e in ipairs(source:getElements()) do
-      if e == element then stab = 1.5; break end
+    for _, own_element in ipairs(source:getElements()) do
+      if own_element == element then stab = 1.5; break end
     end
   end
-
-  -- 暴击：crit_rate 每级 6.25%（简化，TODO 与实机核对）
-  local crit_rate = skill:getCritRate() or 0
-  local crit = crit_rate > 0 and self.rng:chance(6.25 * crit_rate) or false
-
-  local random = self.rng:random(85, 100) / 100   -- 0.85 ~ 1.0
-
   return DamageData:new{
     source = source, target = target, skill = skill,
-    power = skill:getPower() or 0,
-    category = skill:getCategory(),
-    element = element,
-    attack = attack, defense = defense,
-    stab = stab, multiplier = multiplier,
-    crit = crit, random = random,
+    power = skill:getPower() or 0, category = skill:getCategory(), element = element,
+    attack = attack, defense = defense, stab = stab, multiplier = multiplier,
+    crit = false, crit_chance = math.max(0, math.min(100, (1 + (skill:getCritRate() or 0)) * 100 / 16)),
+    crit_resistance = 0, random = self.rng:random(217, 255) / 255,
     damage = 0, prevented = false,
   }
 end
 
---- 套伤害公式（系数待与实机核对）。
+--- 普通攻击的裸伤公式。先算等级/威力/攻防/本系/克制，再取随机浮动，最后算致命。
+--- 取整位置按公开页游实测记录，依据和未验证边界见 docs/battle-rules.md。
+--- 未引入套装、宝石、穿甲或变威力专用分支，不能宣称覆盖完整实机伤害系统。
 ---@param dmg DamageData
 ---@return integer
 function GameLogic:damageFormula(dmg)
-  local level = dmg.source:getLevel() or 50
-  local base = math.floor((2 * level / 5 + 2) * dmg.power * dmg.attack / dmg.defense / 50 + 2)
-  local damage = base
-  damage = damage * (dmg.stab or 1)
-  damage = damage * (dmg.multiplier or 1)
-  if dmg.crit then damage = damage * 1.5 end
-  damage = damage * (dmg.random or 1)
-  return math.max(1, math.floor(damage))
+  if dmg.prevented or dmg.power <= 0 or (dmg.multiplier or 1) == 0 then return 0 end
+  assert(dmg.defense > 0, "伤害计算的防御必须大于 0")
+  local level = dmg.source:getLevel()
+  local base = ((level * 0.4 + 2) * dmg.power * dmg.attack / dmg.defense / 50 + 2)
+    * (dmg.stab or 1) * (dmg.multiplier or 1)
+  local damage = math.floor(math.floor(base) * (dmg.random or 1))
+  if dmg.crit then
+    damage = math.floor(damage * (1 - (dmg.crit_resistance or 0))) * 2
+  end
+  return math.max(1, damage)
 end
 
 --- 唯一改血的地方。num 可正可负。
@@ -297,66 +308,74 @@ end
 
 -- ============================ 一回合 / 一次攻击 ============================
 
---- 一次攻击：命中判定 → 连击 → 每击走伤害链 → 扣 PP。
+--- 一次完整技能使用：属性技能与攻击技能共用命中、PP 和技能时机。
+---@return SkillUseData
+function GameLogic:useSkill(source, skill, target)
+  return UseSkillFlow.run(self, source, skill, target)
+end
+
+--- 兼容旧调用入口，统一转发技能流程；不再维护另一套 PP/命中逻辑。
+---@return SkillUseData
 function GameLogic:doAttack(source, skill, target)
-  -- 显式传递给本次攻击的全部时机，技能效果不注册成常驻来源。
+  return self:useSkill(source, skill, target)
+end
+
+--- 已经命中的攻击技能。只负责伤害，不重复判命中或扣 PP。
+--- AttackReady 位于扣血之前，Attack 位于扣血之后，整次攻击只触发一次 AfterAttack。
+---@return AttackData
+function GameLogic:resolveAttack(source, skill, target)
   local action = { source = source, skill = skill }
   local data = AttackData:new{
     source = source, target = target, skill = skill,
-    hits = 1, damage = 0, missed = false, crit = false,
+    hits = 0, damage = 0, missed = false, crit = false, prevented = false,
   }
-
-  local broken = self:trigger(A.BeforeAttack, target, data, action)
-  if broken or data.prevented then return end
-  self:trigger(A.AttackStart, target, data, action)
-
-  -- 命中判定（nil / <=0 = 必中）。
-  -- 未命中仍触发 AttackEnd；命中后效果请挂 AfterAttack，或自行检查 data.missed。
-  local acc = skill:getAccuracy()
-  if acc and acc > 0 and not self.rng:chance(acc) then
-    data.missed = true
-    self:notify{ type = "SkillMissed", source = source, target = target, skill = skill }
+  local function emit(timing, value)
+    local broken = self:trigger(timing, target, value, action)
+    if broken then value.prevented = true end
+    return broken or value.prevented
+  end
+  if emit(A.BeforeAttack, data) or emit(A.AttackStart, data) then
     self:trigger(A.AttackEnd, target, data, action)
-    return
+    return data
   end
-
-  -- 连击次数（整数或函数，上限 20 防死循环）
   local hits = skill:getHits()
-  local n = 1
-  if type(hits) == "number" then
-    n = hits
-  elseif type(hits) == "function" then
-    n = hits(skill, source, target, self)
-  end
-  n = math.max(1, math.min(math.floor(n or 1), 20))
-
-  for i = 1, n do
-    if self:isFainted(target) then break end
+  if type(hits) == "function" then hits = hits(skill, source, target, self) end
+  local count = math.max(1, math.min(math.floor(hits or 1), 20))
+  for index = 1, count do
+    if self:isFainted(source) or self:isFainted(target) then break end
     local dmg = self:calcParams(source, target, skill)
-
-    self:trigger(A.DamageParamCalculate, target, dmg, action)
-    self:trigger(A.BeforeDamageCalculate, target, dmg, action)
-    dmg.damage = self:damageFormula(dmg)      -- DamageCalculate 的核心动作
-    self:trigger(A.DamageCalculate, target, dmg, action)
-    self:trigger(A.AfterDamageCalculate, target, dmg, action)
-    self:trigger(A.FinalDamageCalculate, target, dmg, action)
-
-    if dmg.prevented or dmg.damage < 1 then
-      self:notify{ type = "DamagePrevented", source = source, target = target, skill = skill }
-    else
-      self:changeHp(target, -dmg.damage, skill.name)
-      data.damage = data.damage + dmg.damage
-      data.crit = data.crit or dmg.crit
+    dmg.index = index
+    data.damage_data = dmg
+    if not emit(A.DamageParamCalculate, dmg) and not emit(A.CriticalChanceCalculate, dmg) then
+      dmg.crit = self.rng:chance(math.max(0, math.min(100, dmg.crit_chance)))
+      if not emit(A.BeforeDamageCalculate, dmg) then
+        dmg.damage = self:damageFormula(dmg)
+        if not emit(A.DamageCalculate, dmg) and not emit(A.AfterDamageCalculate, dmg) then
+          emit(A.FinalDamageCalculate, dmg)
+        end
+      end
     end
+    if not dmg.prevented then emit(A.AttackReady, data) end
+    if data.prevented or dmg.prevented or dmg.damage < 1 then
+      self:notify{ type = "DamagePrevented", source = source, target = target, skill = skill.name }
+    else
+      local actual = -self:changeHp(target, -dmg.damage, skill.name)
+      data.damage = data.damage + actual
+      data.crit = data.crit or dmg.crit
+      data.hits = data.hits + 1
+      -- 普通技能先按原防御等级算伤害，再由致命消除对应防御强化；不清除负等级。
+      if dmg.crit then
+        local defense = skill:isPhysical() and "defense" or "sp_defense"
+        self.room:clearPositiveStatStages(target, source, "致命一击", { defense })
+      end
+      self:notify{ type = "Damage", source = source, target = target, damage = actual, crit = dmg.crit }
+      self:trigger(A.Attack, target, data, action)
+    end
+    if data.prevented then break end
   end
-
-  self:usePP(source, skill, 1)
-
-  self:trigger(A.AttackReady, target, data, action)
-  self:trigger(A.Attack, target, data, action)
-  self:trigger(A.AfterAttack, target, data, action)
-
+  if not data.prevented then self:trigger(A.AfterAttack, target, data, action) end
   self:trigger(A.AttackEnd, target, data, action)
+  return data
 end
 
 --- 一个大回合：双方选行动 → 定先后手 → 逐个出手 → 收尾。
@@ -377,9 +396,9 @@ function GameLogic:doRound()
     local pa = a.skill and a.skill:getPriority() or -math.huge
     local pb = b.skill and b.skill:getPriority() or -math.huge
     if pa ~= pb then return pa > pb end
-    local sa, sb = a.source:getStat("speed"), b.source:getStat("speed")
+    local sa, sb = self:getEffectiveStat(a.source, "speed"), self:getEffectiveStat(b.source, "speed")
     if sa ~= sb then return sa > sb end
-    return (a.source.seat or 0) < (b.source.seat or 0)
+    return self.room:seatOf(a.source) < self.room:seatOf(b.source)
   end)
 
   local order = {}
@@ -391,7 +410,7 @@ function GameLogic:doRound()
     if self.game_over then break end
     if not self:isFainted(action.source) then
       if action.skill and action.target then
-        self:doAttack(action.source, action.skill, action.target)
+        self:useSkill(action.source, action.skill, action.target)
       else
         self:notify{ type = "ActionSkipped", source = action.source }
       end

@@ -35,6 +35,8 @@ end
 
 local gameflow = require "core.events.gameflow"
 local attack = require "core.events.attack"
+local useskill = require "core.events.useskill"
+local stat_stage = require "core.events.stat_stage"
 
 --- 全部时机类，按战斗流程的先后顺序排列（每个元素是类，不是实例）。
 ---@type TriggerEvent[]
@@ -43,9 +45,12 @@ local TIMINGS = {
   gameflow.TurnStart,
   gameflow.TurnReady,
   gameflow.DecidePriority,
+  useskill.BeforeSkillUse,
+  useskill.SkillUsed,
   attack.BeforeAttack,
   attack.AttackStart,
   attack.DamageParamCalculate,
+  attack.CriticalChanceCalculate,
   attack.BeforeDamageCalculate,
   attack.DamageCalculate,
   attack.AfterDamageCalculate,
@@ -54,9 +59,18 @@ local TIMINGS = {
   attack.Attack,
   attack.AfterAttack,
   attack.AttackEnd,
+  useskill.AfterSkillUse,
   gameflow.TurnEnd,
   gameflow.AfterTurnEnd,
   gameflow.BattleEnd,
+  stat_stage.BeforeStatStageChange,
+  stat_stage.AfterStatStageChange,
+  stat_stage.BeforePositiveStatStagesClear,
+  stat_stage.AfterPositiveStatStagesClear,
+  stat_stage.BeforeNegativeStatStagesClear,
+  stat_stage.AfterNegativeStatStagesClear,
+  stat_stage.BeforeStatStagesReverse,
+  stat_stage.AfterStatStagesReverse,
 }
 
 return {
@@ -64,4 +78,6 @@ return {
   timings = TIMINGS,
   gameflow = gameflow,
   attack = attack,
+  useskill = useskill,
+  stat_stage = stat_stage,
 }

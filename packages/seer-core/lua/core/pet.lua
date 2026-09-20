@@ -13,7 +13,7 @@
 -- ---------------------------- 只做"初始化 + getter" ----------------------------
 --
 -- 本文件读取 spec、计算初始六项属性值，保存效果挂载表与独立的能力等级表。
--- 能力等级只提供基础 getter，具体强化效果负责写入，暂不参与面板或伤害计算。
+-- 能力等级由 BattleRoom 统一修改；GameLogic 在计算攻防、速度和命中时读取。
 -- 当前体力、剩余 PP、濒死、行动与敌我关系仍由战斗逻辑管理。
 --
 -- 于是也刻意**没有**做（它们是养成/图鉴/持久化的事）：
@@ -156,7 +156,7 @@ end
 local GameObject = require "core.gameobject"
 
 ---@class Pet: GameObject
----@field public stat_stages table<string, integer> @ 局内能力等级；初始为 0，暂不参与面板/伤害计算
+---@field public stat_stages table<string, integer> @ 局内六项能力等级；初始为 0，由 BattleRoom 修改
 Pet = GameObject:subclass("Pet")
 
 --- 六项属性值的**字段名**，顺序固定（日志、协议、UI 都按这个顺序走）。
@@ -164,7 +164,7 @@ Pet = GameObject:subclass("Pet")
 Pet.STAT_FIELDS = { "hp", "attack", "defense", "sp_attack", "sp_defense", "speed" }
 
 --- 可强化/弱化的能力项；体力不设能力等级。每只精灵保存独立的等级表。
-Pet.STAT_STAGE_FIELDS = { "attack", "defense", "sp_attack", "sp_defense", "speed", "accuracy", "evasion" }
+Pet.STAT_STAGE_FIELDS = { "attack", "defense", "sp_attack", "sp_defense", "speed", "accuracy" }
 Pet.STAT_STAGE_MIN = -6
 Pet.STAT_STAGE_MAX = 6
 
@@ -363,7 +363,7 @@ function Pet:initialize(spec)
   self.level = spec.level or 1
 
   -- 能力等级属于本只精灵的局内状态，不写回种族或共享技能定义。
-  -- 这里只初始化和提供 getter；改变等级的效果负责边界，暂不接入数值计算。
+  -- 这里只初始化和提供 getter；战斗中的增减、清除统一经过 BattleRoom。
   self.stat_stages = {}
   for _, field in ipairs(Pet.STAT_STAGE_FIELDS) do self.stat_stages[field] = 0 end
 
@@ -521,7 +521,7 @@ function Pet:getStat(field)
 end
 
 --- 读取一个能力等级；未知能力项返回 0，与 getStat 的缺省读取约定一致。
---- 与 getStat 分离：等级变化目前不会改变面板数值或伤害公式。
+--- 与 getStat 分离：面板不变，战斗逻辑计算有效数值时应用等级倍率。
 ---@param field string @ 见 Pet.STAT_STAGE_FIELDS
 ---@return integer
 function Pet:getStatStage(field)

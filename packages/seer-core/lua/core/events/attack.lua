@@ -2,22 +2,12 @@
 --
 -- ============================ 攻击 / 伤害流程时机 ============================
 --
--- 一次攻击从"要打出去"到"打完收工"的完整时间轴：
+-- 一次已命中的攻击：BeforeAttack → AttackStart → 每击伤害链 → AfterAttack → AttackEnd。
+-- 每击：DamageParamCalculate → CriticalChanceCalculate → BeforeDamageCalculate
+-- → DamageCalculate → AfterDamageCalculate → FinalDamageCalculate → AttackReady
+-- → 扣血 / 暴击破防 → Attack。AfterAttack 在整次连击结束后执行一次。
+-- 命中和 PP 属于 UseSkill；未命中只保留 AttackEnd 收尾，不进入伤害链。
 --
---   BeforeAttack ── AttackStart ── DamageParamCalculate ── BeforeDamageCalculate
---     ── DamageCalculate ── AfterDamageCalculate ── FinalDamageCalculate
---     ── AttackReady ── Attack ── AfterAttack ── AttackEnd
---
--- 其中"伤害"那一小段（DamageParamCalculate ~ FinalDamageCalculate）是纯数值结算：
--- 先把参数凑齐（威力、攻防、克制、本系、暴击、随机），再套公式，最后收尾修正。
--- 它的结果落到 AttackData.damage；真正扣血发生在 Attack 时机。
---
--- 连击时（技能 hits > 1），BeforeAttack ~ AttackEnd 会跑多遍：每一击都是独立的一次
--- 伤害结算，减伤/护盾/免疫逐击生效。
---
--- 本文件只写**定义**（数据类 + 时机类）。伤害公式、命中判定、暴击掷骰、克制查表
--- 都后面再实现（分别在 damage / element / logic 里）。
-
 -- ---------------------------- 数据类 ----------------------------
 
 --- 一次攻击的数据（BeforeAttack ~ AttackEnd 共用）。
@@ -29,6 +19,7 @@
 ---@field public crit boolean @ 是否暴击
 ---@field public hits integer @ 一共打了几下（连击）
 ---@field public damage integer @ 本次攻击造成的总伤害（各击累加）
+---@field public prevented boolean? @ 取消当前攻击
 ---@field public damage_data DamageData? @ 当前这一击伤害结算的数据
 AttackData = TriggerData:subclass("AttackData")
 
@@ -45,7 +36,10 @@ AttackData = TriggerData:subclass("AttackData")
 ---@field public stab number @ 本系加成倍率
 ---@field public multiplier number @ 属性克制倍率
 ---@field public crit boolean @ 是否暴击
----@field public random number @ 随机浮动系数（0.85~1.0 之类，具体待定）
+---@field public crit_chance number @ 致命概率百分数，0..100，CriticalChanceCalculate 可修改
+---@field public crit_resistance number @ 致命伤害减免比例，默认 0
+---@field public index integer? @ 当前击数
+---@field public random number @ 整数随机数 217..255 除以 255
 ---@field public damage integer @ 当前伤害值（结算链上被各时机修改）
 ---@field public prevented boolean @ 伤害是否被防止（归零 / 免疫 / 抵挡）
 DamageData = TriggerData:subclass("DamageData")
@@ -72,6 +66,11 @@ local AttackStart = TriggerEvent:subclass("AttackStart")
 ---@class DamageParamCalculate: TriggerEvent
 ---@field data DamageData
 local DamageParamCalculate = TriggerEvent:subclass("DamageParamCalculate")
+
+--- 命中后、致命判定之前。效果通过 data.crit_chance 修改概率，不污染共享技能。
+---@class CriticalChanceCalculate: TriggerEvent
+---@field data DamageData
+local CriticalChanceCalculate = TriggerEvent:subclass("CriticalChanceCalculate")
 
 --- 伤害公式计算之前（参数还可以改）。
 ---@class BeforeDamageCalculate: TriggerEvent
@@ -117,6 +116,7 @@ return {
   BeforeAttack = BeforeAttack,
   AttackStart = AttackStart,
   DamageParamCalculate = DamageParamCalculate,
+  CriticalChanceCalculate = CriticalChanceCalculate,
   BeforeDamageCalculate = BeforeDamageCalculate,
   DamageCalculate = DamageCalculate,
   AfterDamageCalculate = AfterDamageCalculate,

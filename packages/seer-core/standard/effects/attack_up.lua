@@ -9,7 +9,6 @@ return Seer:createEffect{
       and ctx.owner:getStatStage("attack") < Pet.STAT_STAGE_MAX
   end,
   on_use = function(_, ctx)
-    ctx.owner.stat_stages.attack = math.min(
-      Pet.STAT_STAGE_MAX, ctx.owner:getStatStage("attack") + 1)
+    ctx.room:changeStatStages(ctx.owner, { attack = 1 }, ctx.source, "攻击提升一级")
   end,
 }
